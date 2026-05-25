@@ -37,13 +37,13 @@ function getCallbackUrl(req) {
 
 // ─── Auth ────────────────────────────────────────────────────────────────────
 
-app.get('/auth/login', (req, res) => {
-  const loginUrl = (req.query.loginUrl || 'https://login.salesforce.com').replace(/\/$/, '');
-  const clientId = req.query.clientId || process.env.SF_CLIENT_ID;
-  const clientSecret = req.query.clientSecret || process.env.SF_CLIENT_SECRET;
+app.post('/auth/login', (req, res) => {
+  const loginUrl = (req.body.loginUrl || 'https://login.salesforce.com').replace(/\/$/, '');
+  const clientId = req.body.clientId || process.env.SF_CLIENT_ID;
+  const clientSecret = req.body.clientSecret || process.env.SF_CLIENT_SECRET;
 
   if (!clientId || !clientSecret) {
-    return res.redirect(`${getBaseUrl(req)}/?error=missing_credentials`);
+    return res.status(400).json({ error: 'missing_credentials' });
   }
 
   req.session.loginUrl = loginUrl;
@@ -57,7 +57,7 @@ app.get('/auth/login', (req, res) => {
     redirectUri: getCallbackUrl(req)
   });
 
-  res.redirect(oauth2.getAuthorizationUrl({ scope: 'api refresh_token' }));
+  res.json({ redirectUrl: oauth2.getAuthorizationUrl({ scope: 'api refresh_token' }) });
 });
 
 app.get('/auth/callback', async (req, res) => {
@@ -110,11 +110,21 @@ function requireAuth(req, res, next) {
 }
 
 function safeQuery(conn, soql) {
-  return conn.query(soql).catch(err => ({ records: [], error: err.message }));
+  return new Promise((resolve) => {
+    conn.query(soql, (err, result) => {
+      if (err) resolve({ records: [], error: err.message });
+      else resolve(result);
+    });
+  });
 }
 
 function safeDescribe(conn, obj) {
-  return conn.describe(obj).catch(() => null);
+  return new Promise((resolve) => {
+    conn.describe(obj, (err, result) => {
+      if (err) resolve(null);
+      else resolve(result);
+    });
+  });
 }
 
 async function safeRest(conn, path) {

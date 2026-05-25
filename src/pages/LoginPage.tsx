@@ -17,15 +17,29 @@ export default function LoginPage({ onLogin }: Props) {
     }
   }, []);
 
-  const handleConnect = () => {
+  const handleConnect = async () => {
     if (!loginUrl.trim() || !clientId.trim() || !clientSecret.trim()) {
       setError('All three fields are required.');
       return;
     }
     let url = loginUrl.trim().replace(/\/$/, '');
     if (!url.startsWith('http')) url = 'https://' + url;
-    const params = new URLSearchParams({ loginUrl: url, clientId: clientId.trim(), clientSecret: clientSecret.trim() });
-    window.location.href = `/auth/login?${params.toString()}`;
+    try {
+      const res = await fetch('/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ loginUrl: url, clientId: clientId.trim(), clientSecret: clientSecret.trim() }),
+        credentials: 'include'
+      });
+      const data = await res.json();
+      if (data.redirectUrl) {
+        window.location.href = data.redirectUrl;
+      } else {
+        setError('Authentication failed. Check your credentials.');
+      }
+    } catch (e) {
+      setError('Could not connect to server.');
+    }
   };
 
   return (
