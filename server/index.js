@@ -144,12 +144,12 @@ app.get('/api/assess/licensing', requireAuth, async (req, res) => {
   try {
     const conn = getConn(req);
     const [limits, orgInfo, einsteingSetting] = await Promise.all([
-      safeRest(conn, '/services/data/v59.0/limits/'),
-      safeRest(conn, '/services/data/v59.0/sobjects/Organization/describe/').catch(() => null),
+      safeRest(conn, '/services/data/v62.0/limits/'),
+      safeRest(conn, '/services/data/v62.0/sobjects/Organization/describe/').catch(() => null),
       safeQuery(conn, "SELECT Id, SettingName, SettingValue FROM OrganizationSetting WHERE SettingName IN ('EinsteinGptEnabled','AgentforceEnabled','DataCloudEnabled') LIMIT 10").catch(() => ({ records: [] }))
     ]);
 
-    const featureFlags = await safeRest(conn, '/services/data/v59.0/tooling/query/?q=SELECT+QualifiedApiName,IsEnabled+FROM+FeatureParameterBoolean+WHERE+QualifiedApiName+IN+(\'AgentforceEnabled\',\'EinsteinGenAI\',\'DataCloud\')').catch(() => ({ records: [] }));
+    const featureFlags = await safeRest(conn, '/services/data/v62.0/tooling/query/?q=SELECT+QualifiedApiName,IsEnabled+FROM+FeatureParameterBoolean+WHERE+QualifiedApiName+IN+(\'AgentforceEnabled\',\'EinsteinGenAI\',\'DataCloud\')').catch(() => ({ records: [] }));
 
     const [orgSettingsRes, manageAIAgentsPS] = await Promise.all([
       safeQuery(conn, "SELECT SettingName, SettingValue FROM OrganizationSetting WHERE SettingName IN ('EinsteinGptEnabled','AgentforceEnabled','DataCloudEnabled') LIMIT 10"),
@@ -157,8 +157,9 @@ app.get('/api/assess/licensing', requireAuth, async (req, res) => {
     ]);
     const settings = {};
     (orgSettingsRes.records || []).forEach(r => { settings[r.SettingName] = r.SettingValue; });
+    const einsteinEnabled = settings['EinsteinGptEnabled'] === 'true' || settings['EinsteinGenerativeAIEnabled'] === 'true';
     const autoChecks = [
-      ac('lic_ac_1', 'Einstein Generative AI is enabled', settings['EinsteinGptEnabled'] === 'true', 'Einstein Generative AI is not enabled in org settings'),
+      ac('lic_ac_1', 'Einstein Generative AI is enabled', einsteinEnabled, 'Einstein Generative AI is not enabled in org settings'),
       ac('lic_ac_2', 'Agentforce is enabled', settings['AgentforceEnabled'] === 'true', 'Agentforce is not enabled in org settings'),
       ac('lic_ac_3', 'Data Cloud is enabled', settings['DataCloudEnabled'] === 'true', 'Data Cloud is not enabled in org settings'),
       ac('lic_ac_4', 'A permission set with Manage AI Agents exists', (manageAIAgentsPS.records || []).length > 0, 'No permission set found with Manage AI Agents — admin cannot manage agents')
@@ -191,12 +192,12 @@ app.get('/api/assess/security-model', requireAuth, async (req, res) => {
     const conn = getConn(req);
     const [owdRules, sharingRules, restrictionRules] = await Promise.all([
       safeQuery(conn, 'SELECT SobjectType, DefaultInternalAccess, DefaultExternalAccess FROM ObjectPermissions LIMIT 5').catch(() => ({ records: [] })),
-      safeRest(conn, '/services/data/v59.0/tooling/query/?q=SELECT+Id,SobjectType,SharingModel+FROM+SharingRules+LIMIT+100').catch(() => ({ records: [] })),
+      safeRest(conn, '/services/data/v62.0/tooling/query/?q=SELECT+Id,SobjectType,SharingModel+FROM+SharingRules+LIMIT+100').catch(() => ({ records: [] })),
       safeQuery(conn, 'SELECT Id, DeveloperName, Description FROM RestrictionRule LIMIT 20').catch(() => ({ records: [] }))
     ]);
 
     const [caseOwdRes, viewAllDataPS, restrictionRulesRes] = await Promise.all([
-      safeRest(conn, "/services/data/v59.0/tooling/query/?q=SELECT+QualifiedApiName,DefaultInternalAccess,DefaultExternalAccess+FROM+EntityDefinition+WHERE+QualifiedApiName+IN+('Case','Account','Contact')").catch(() => ({ records: [] })),
+      safeRest(conn, "/services/data/v62.0/tooling/query/?q=SELECT+QualifiedApiName,DefaultInternalAccess,DefaultExternalAccess+FROM+EntityDefinition+WHERE+QualifiedApiName+IN+('Case','Account','Contact')").catch(() => ({ records: [] })),
       safeQuery(conn, "SELECT Id, Name FROM PermissionSet WHERE PermissionsViewAllData = true AND IsCustom = true LIMIT 10").catch(() => ({ records: [] })),
       safeQuery(conn, 'SELECT Id FROM RestrictionRule LIMIT 1').catch(() => ({ records: [] }))
     ]);
@@ -276,7 +277,7 @@ app.get('/api/assess/trust-layer', requireAuth, async (req, res) => {
 
     const [einsteinSettingRes, classifiedFieldCheck] = await Promise.all([
       safeQuery(conn, "SELECT SettingName, SettingValue FROM OrganizationSetting WHERE SettingName = 'EinsteinGptEnabled' LIMIT 1").catch(() => ({ records: [] })),
-      safeRest(conn, "/services/data/v59.0/tooling/query/?q=SELECT+Id+FROM+FieldDefinition+WHERE+DataClassification+%21%3D+'NonSensitive'+AND+DataClassification+%21%3D+null+LIMIT+1").catch(() => ({ records: [] }))
+      safeRest(conn, "/services/data/v62.0/tooling/query/?q=SELECT+Id+FROM+FieldDefinition+WHERE+DataClassification+%21%3D+'NonSensitive'+AND+DataClassification+%21%3D+null+LIMIT+1").catch(() => ({ records: [] }))
     ]);
     const einsteinEnabled = (einsteinSettingRes.records || [])[0]?.SettingValue === 'true';
     const hasClassifiedFields = (classifiedFieldCheck.records || []).length > 0;
@@ -351,17 +352,17 @@ app.get('/api/assess/data-quality', requireAuth, async (req, res) => {
 app.get('/api/assess/knowledge', requireAuth, async (req, res) => {
   try {
     const conn = getConn(req);
-    const [articles, archivedArticles, articleTypes] = await Promise.all([
+    const [articles, archivedArticles, knowledgeEnabled] = await Promise.all([
       safeQuery(conn, "SELECT COUNT() FROM Knowledge__kav WHERE PublishStatus = 'Online' AND Language = 'en_US'").catch(() => ({ totalSize: 0 })),
       safeQuery(conn, "SELECT COUNT() FROM Knowledge__kav WHERE PublishStatus = 'Archived'").catch(() => ({ totalSize: 0 })),
-      safeQuery(conn, 'SELECT Id, DeveloperName FROM KnowledgeArticleType LIMIT 20').catch(() => ({ records: [] }))
+      safeQuery(conn, "SELECT COUNT() FROM Knowledge__kav LIMIT 1").catch(() => ({ totalSize: 0 }))
     ]);
 
     const publishedArticles = articles.totalSize || 0;
     const archivedArticles2 = archivedArticles.totalSize || 0;
-    const articleTypesCount = (articleTypes.records || []).length;
+    const articleTypesCount = knowledgeEnabled.totalSize !== undefined ? 1 : 0;
     const autoChecks = [
-      ac('km_ac_1', 'Knowledge is enabled (article types defined)', articleTypesCount > 0, 'Knowledge is not enabled — no article types found, agents cannot ground on Knowledge articles'),
+      ac('km_ac_1', 'Knowledge (Lightning) is enabled', publishedArticles > 0 || knowledgeEnabled.totalSize !== undefined, 'Knowledge is not enabled — agents cannot ground on Knowledge articles'),
       ac('km_ac_2', 'Published Knowledge articles exist', publishedArticles > 0, 'No published Knowledge articles — agent has no content to ground on'),
       ac('km_ac_3', 'Archive ratio is healthy (published >= archived)', publishedArticles >= archivedArticles2, `Archived articles (${archivedArticles2}) exceed published (${publishedArticles}) — article lifecycle governance may be needed`)
     ];
@@ -522,22 +523,25 @@ app.get('/api/assess/lightning-pages', requireAuth, async (req, res) => {
 app.get('/api/assess/automation', requireAuth, async (req, res) => {
   try {
     const conn = getConn(req);
-    const [flows, apexClasses, promptTemplates] = await Promise.all([
-      safeQuery(conn, "SELECT Id, DeveloperName, ProcessType, Status FROM Flow WHERE ProcessType IN ('AutoLaunchedFlow','Workflow') AND Status = 'Active' LIMIT 100"),
-      safeQuery(conn, 'SELECT Id, Name, IsValid, ApiVersion FROM ApexClass WHERE Status = \'Active\' LIMIT 200'),
-      safeQuery(conn, 'SELECT Id, DeveloperName, Type FROM PromptTemplate LIMIT 30').catch(() => ({ records: [] }))
+    const [flows, apexClasses, promptTemplates, agentFunctions] = await Promise.all([
+      safeQuery(conn, "SELECT Id, DeveloperName, ProcessType, Status FROM Flow WHERE ProcessType = 'AutoLaunchedFlow' AND Status = 'Active' LIMIT 100"),
+      safeQuery(conn, "SELECT Id, Name, IsValid, ApiVersion FROM ApexClass WHERE Status = 'Active' LIMIT 200"),
+      safeQuery(conn, "SELECT Id, DeveloperName, Type FROM PromptTemplate WHERE Status = 'Active' LIMIT 30").catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT Id, DeveloperName FROM GenAiFunction WHERE IsActive = true LIMIT 30").catch(() => ({ records: [] }))
     ]);
 
-    const outdatedApex = (apexClasses.records || []).filter(c => parseFloat(c.ApiVersion) < 50);
+    const outdatedApex = (apexClasses.records || []).filter(c => parseFloat(c.ApiVersion) < 56);
     const outdatedApexCount = outdatedApex.length;
     const activeFlowsCount = (flows.records || []).length;
     const promptTemplatesCount = (promptTemplates.records || []).length;
     const invalidApexCount = (apexClasses.records || []).filter(c => !c.IsValid).length;
+    const agentFunctionsCount = (agentFunctions.records || []).length;
     const autoChecks = [
-      ac('auto_ac_1', 'Active flows exist (candidate agent actions)', activeFlowsCount > 0, 'No active flows found — no existing automation available to use as Agentforce actions'),
-      ac('auto_ac_2', 'All Apex classes use current API versions (>=v50)', outdatedApexCount === 0, `${outdatedApexCount} Apex class(es) use outdated API versions (<v50) — upgrade before using as agent actions`),
-      ac('auto_ac_3', 'Prompt templates are configured', promptTemplatesCount > 0, 'No prompt templates found — agent grounding prompts and action prompts are not yet defined'),
-      ac('auto_ac_4', 'No invalid Apex classes', invalidApexCount === 0, `${invalidApexCount} Apex class(es) have compilation errors — fix before using as agent actions`)
+      ac('auto_ac_1', 'Active AutoLaunchedFlows exist (candidate agent actions)', activeFlowsCount > 0, 'No active AutoLaunchedFlows found — no existing automation available to use as Agentforce actions'),
+      ac('auto_ac_2', 'Apex classes use Spring \'23+ API versions (>=v56)', outdatedApexCount === 0, `${outdatedApexCount} Apex class(es) use API versions below v56 — upgrade before using as Agentforce invocable actions`),
+      ac('auto_ac_3', 'Active prompt templates are configured', promptTemplatesCount > 0, 'No active prompt templates found — agent grounding prompts and action prompts are not yet defined'),
+      ac('auto_ac_4', 'No invalid Apex classes', invalidApexCount === 0, `${invalidApexCount} Apex class(es) have compilation errors — fix before using as agent actions`),
+      ac('auto_ac_5', 'Agent actions (GenAiFunction) are configured', agentFunctionsCount > 0, 'No active GenAiFunction records found — no actions have been configured in Agentforce Builder yet')
     ];
 
     res.json({
@@ -547,6 +551,7 @@ app.get('/api/assess/automation', requireAuth, async (req, res) => {
       outdatedApexCount,
       promptTemplatesCount,
       promptTemplates: promptTemplates.records || [],
+      agentFunctionsCount,
       autoChecks,
       questions: [
         { id: 'auto_1', text: 'Have existing flows, Apex, and APIs been inventoried as potential agent actions?', type: 'boolean' },
@@ -567,15 +572,15 @@ app.get('/api/assess/agentforce-builder', requireAuth, async (req, res) => {
     const conn = getConn(req);
     const [agents, topics] = await Promise.all([
       safeQuery(conn, 'SELECT Id, DeveloperName, Status FROM BotDefinition LIMIT 30').catch(() => ({ records: [] })),
-      safeQuery(conn, 'SELECT Id, DeveloperName, Description FROM BotTopic LIMIT 50').catch(() => ({ records: [] }))
+      safeQuery(conn, 'SELECT Id, DeveloperName, MasterLabel FROM GenAiPlugin WHERE IsActive = true LIMIT 50').catch(() => ({ records: [] }))
     ]);
 
     const agentsFound = (agents.records || []).length;
     const topicsFound = (topics.records || []).length;
     const autoChecks = [
       ac('ab_ac_1', 'Agentforce agents (Bot Definitions) are defined', agentsFound > 0, 'No Agentforce agents found — agent build has not started'),
-      ac('ab_ac_2', 'Agent topics/subagents are defined', topicsFound > 0, 'No agent topics found — agents have no defined scope or capabilities'),
-      ac('ab_ac_3', 'Topics-to-agents ratio suggests decomposition (>=1 topic per agent)', agentsFound > 0 && topicsFound >= agentsFound, agentsFound === 0 ? 'No agents found' : `${agentsFound} agent(s) but ${topicsFound} topic(s) — ensure each agent has at least one topic scoped to a job-to-be-done`)
+      ac('ab_ac_2', 'Agent subagents/topics (GenAiPlugin) are defined', topicsFound > 0, 'No active GenAiPlugin records found — agents have no defined subagents or topics'),
+      ac('ab_ac_3', 'Topics-to-agents ratio suggests decomposition (>=1 topic per agent)', agentsFound > 0 && topicsFound >= agentsFound, agentsFound === 0 ? 'No agents found' : `${agentsFound} agent(s) but ${topicsFound} subagent(s) — ensure each agent has at least one topic scoped to a job-to-be-done`)
     ];
 
     res.json({
@@ -678,16 +683,23 @@ app.get('/api/assess/integrations', requireAuth, async (req, res) => {
 app.get('/api/assess/data-cloud', requireAuth, async (req, res) => {
   try {
     const conn = getConn(req);
-    const dataStreams = await safeQuery(conn, 'SELECT Id, DeveloperName, Category FROM DataStream LIMIT 30').catch(() => ({ records: [] }));
+    const [dataCloudSetting, dataLibraries] = await Promise.all([
+      safeQuery(conn, "SELECT SettingName, SettingValue FROM OrganizationSetting WHERE SettingName = 'DataCloudEnabled' LIMIT 1").catch(() => ({ records: [] })),
+      safeQuery(conn, 'SELECT Id, DeveloperName, Type FROM AgentforceDataLibrary LIMIT 20').catch(() => ({ records: [] }))
+    ]);
 
+    const dataCloudEnabled = (dataCloudSetting.records || [])[0]?.SettingValue === 'true';
+    const dataLibrariesCount = (dataLibraries.records || []).length;
     const autoChecks = [
-      ac('dc_ac_1', 'Data streams are configured in Data Cloud', (dataStreams.records||[]).length > 0, 'No Data Cloud data streams found — Data 360 is not configured for Agentforce grounding')
+      ac('dc_ac_1', 'Data Cloud is provisioned and enabled', dataCloudEnabled, 'Data Cloud is not enabled in org settings — Data 360 grounding for Agentforce requires Data Cloud'),
+      ac('dc_ac_2', 'Agentforce Data Libraries are configured', dataLibrariesCount > 0, 'No Agentforce Data Libraries found — unstructured data grounding for agents is not configured')
     ];
 
     res.json({
       category: 'Data 360 / Data Cloud Architecture',
-      dataStreamsFound: (dataStreams.records || []).length,
-      dataStreams: dataStreams.records || [],
+      dataCloudEnabled,
+      dataLibrariesCount,
+      dataLibraries: dataLibraries.records || [],
       autoChecks,
       questions: [
         { id: 'dc_1', text: 'Is Data 360 set up with data streams, identity resolution, and calculated insights?', type: 'boolean' },
@@ -707,7 +719,7 @@ app.get('/api/assess/testing', requireAuth, async (req, res) => {
     const conn = getConn(req);
     const [apexTestClasses, overallCoverage] = await Promise.all([
       safeQuery(conn, "SELECT Id, Name FROM ApexClass WHERE Name LIKE '%Test%' AND Status = 'Active' LIMIT 100"),
-      safeRest(conn, '/services/data/v59.0/tooling/query/?q=SELECT+PercentCovered+FROM+ApexOrgWideCoverage').catch(() => ({ records: [] }))
+      safeRest(conn, '/services/data/v62.0/tooling/query/?q=SELECT+PercentCovered+FROM+ApexOrgWideCoverage').catch(() => ({ records: [] }))
     ]);
 
     const orgCoverage = (overallCoverage.records || [])[0]?.PercentCovered || 0;
@@ -743,7 +755,7 @@ app.get('/api/assess/testing', requireAuth, async (req, res) => {
 app.get('/api/assess/observability', requireAuth, async (req, res) => {
   try {
     const conn = getConn(req);
-    const eventLogFiles = await safeQuery(conn, "SELECT Id, EventType, CreatedDate FROM EventLogFile WHERE EventType IN ('AgentforceSession','EinsteinPrompt') ORDER BY CreatedDate DESC LIMIT 20").catch(() => ({ records: [] }));
+    const eventLogFiles = await safeQuery(conn, "SELECT Id, EventType, CreatedDate FROM EventLogFile WHERE EventType IN ('AgentforceSession','EinsteinGPTGeneration','AgentforceAction','EinsteinGenerativeAI') ORDER BY CreatedDate DESC LIMIT 20").catch(() => ({ records: [] }));
 
     const eventLogFilesFound = (eventLogFiles.records || []).length;
     const autoChecks = [
@@ -774,7 +786,7 @@ app.get('/api/assess/devops', requireAuth, async (req, res) => {
     const conn = getConn(req);
     const [sandboxes, deployments] = await Promise.all([
       safeQuery(conn, 'SELECT Id, SandboxName, LicenseType FROM SandboxInfo LIMIT 20').catch(() => ({ records: [] })),
-      safeQuery(conn, "SELECT Id, Status, StartDate FROM DeployRequest WHERE Status IN ('Succeeded','Failed') ORDER BY StartDate DESC LIMIT 10").catch(() => ({ records: [] }))
+      safeRest(conn, "/services/data/v62.0/tooling/query/?q=SELECT+Id,Status,StartDate+FROM+DeployRequest+WHERE+Status+IN+('Succeeded','Failed')+ORDER+BY+StartDate+DESC+LIMIT+10").catch(() => ({ records: [] }))
     ]);
 
     const sandboxesFound = (sandboxes.records || []).length;
@@ -808,7 +820,7 @@ app.get('/api/assess/devops', requireAuth, async (req, res) => {
 app.get('/api/assess/performance', requireAuth, async (req, res) => {
   try {
     const conn = getConn(req);
-    const limits = await safeRest(conn, '/services/data/v59.0/limits/');
+    const limits = await safeRest(conn, '/services/data/v62.0/limits/');
 
     const flags = [];
     if (limits && !limits.error) {
@@ -817,8 +829,9 @@ app.get('/api/assess/performance', requireAuth, async (req, res) => {
         { name: 'DailyApiRequests', label: 'Daily API Requests', ...limits.DailyApiRequests },
         { name: 'DailyAsyncApexExecutions', label: 'Daily Async Apex', ...limits.DailyAsyncApexExecutions },
         { name: 'DailyBulkApiBatches', label: 'Daily Bulk API Batches', ...limits.DailyBulkApiBatches },
-        { name: 'DailyStreamingApiEvents', label: 'Daily Streaming Events', ...limits.DailyStreamingApiEvents }
-      ];
+        { name: 'DailyStreamingApiEvents', label: 'Daily Streaming Events', ...limits.DailyStreamingApiEvents },
+        { name: 'DailyEinsteinRequests', label: 'Daily Einstein/Agentforce AI Requests', ...(limits.DailyEinsteinRequests || {}) }
+      ].filter(c => c.Max);
       checks.forEach(c => {
         const pctUsed = pct(c.Remaining ? (c.Max - c.Remaining) : 0, c.Max);
         flags.push({ ...c, percentUsed: pctUsed, flagged: pctUsed >= 50 });
