@@ -883,7 +883,8 @@ app.get('/api/assess/compliance', requireAuth, async (req, res) => {
 // ─── Serve React app in production ───────────────────────────────────────────
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static(path.join(__dirname, '../build')));
-  app.get('*', (req, res) => {
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/auth') || req.path.startsWith('/api')) return next();
     res.sendFile(path.join(__dirname, '../build', 'index.html'));
   });
 }
