@@ -1,6 +1,6 @@
 # Agentforce Readiness Assessment — Setup Guide
 
-This guide walks you through connecting the Agentforce Readiness Assessment app to a customer's Salesforce sandbox org. The app is already deployed and ready to use — you just need to create a Connected App in the customer org.
+This guide walks you through connecting the Agentforce Readiness Assessment app to a customer's Salesforce sandbox org. The app is already deployed — you just need to create an OAuth app in the customer org.
 
 ---
 
@@ -11,7 +11,69 @@ This guide walks you through connecting the Agentforce Readiness Assessment app 
 
 ---
 
-## Step 1 — Create a Connected App in the Customer Org
+## Which Setup Path Should I Use?
+
+Salesforce introduced **External Client Apps** in Spring '25 as the new way to configure OAuth in newer orgs. Use the table below to determine which path applies:
+
+| Org Type | Setup Path |
+|----------|-----------|
+| Spring '25 or later (most new sandbox orgs) | [Option A — External Client App](#option-a--external-client-app-spring-25-and-later) |
+| Older orgs / Classic Connected App still available | [Option B — Connected App (Classic)](#option-b--connected-app-classic) |
+
+> **How to tell which you have:** Go to Setup and search for "External Client Apps". If the menu item appears, use Option A. If it doesn't exist, use Option B.
+
+---
+
+## Option A — External Client App (Spring '25 and later)
+
+### Step 1 — Create the External Client App
+
+1. Log in to the customer sandbox as a System Administrator
+2. Go to **Setup** → search for **External Client Apps** → click **New External Client App**
+3. Fill in the following:
+
+   **Basic Information**
+   | Field | Value |
+   |-------|-------|
+   | External Client App Name | `Agentforce Readiness Assessment` |
+   | API Name | `Agentforce_Readiness_Assessment` |
+   | Contact Email | your email address |
+   | Distribution State | `Local` |
+
+4. Click **Next**
+
+### Step 2 — Configure OAuth
+
+1. On the OAuth page, set the following:
+   - **Callback URL:** `https://agentforce-readiness.onrender.com/auth/callback`
+   - **OAuth Scopes:** Add both:
+     - `Access and manage your data (api)`
+     - `Perform requests on your behalf at any time (refresh_token, offline_access)`
+   - **Client Credentials Flow:** Leave disabled
+   - **Require Proof Key for Code Exchange (PKCE):** Leave **unchecked**
+2. Click **Save**
+
+> **Note:** Allow 2–10 minutes for the app to activate after saving.
+
+### Step 3 — Get the Consumer Key and Secret
+
+1. In External Client Apps, find your app and click **View**
+2. Click **Manage Consumer Details** (may require re-authentication)
+3. Copy the **Consumer Key** (Client ID) and **Consumer Secret** — you need both to log in
+
+### Step 4 — Set Policies
+
+1. In External Client Apps, find your app and click **Manage**
+2. Click **Edit Policies**
+3. Set **Permitted Users** to `All users may self-authorize`
+4. Set **IP Relaxation** to `Relax IP restrictions`
+5. Click **Save**
+
+---
+
+## Option B — Connected App (Classic)
+
+### Step 1 — Create the Connected App
 
 1. Log in to the customer sandbox as a System Administrator
 2. Go to **Setup** → search for **App Manager** → click **New Connected App**
@@ -30,57 +92,52 @@ This guide walks you through connecting the Agentforce Readiness Assessment app 
    - **Selected OAuth Scopes:** Add both:
      - `Access and manage your data (api)`
      - `Perform requests on your behalf at any time (refresh_token, offline_access)`
-   - Uncheck **Require Proof Key for Code Exchange (PKCE)** if checked
-   - Leave all other settings as default
+   - **Require Proof Key for Code Exchange (PKCE):** Leave **unchecked**
 
 4. Click **Save** → Click **Continue**
 
 > **Note:** Allow 2–10 minutes for the Connected App to activate after saving.
 
----
+### Step 2 — Get the Consumer Key and Secret
 
-## Step 2 — Get the Consumer Key and Secret
-
-1. In App Manager, find your new Connected App and click **View**
+1. In App Manager, find your Connected App and click **View**
 2. Click **Manage Consumer Details** (may require re-authentication)
-3. Copy the **Consumer Key** (Client ID) and **Consumer Secret** — you will need both to log in
+3. Copy the **Consumer Key** (Client ID) and **Consumer Secret**
 
----
-
-## Step 3 — Set OAuth Policies
+### Step 3 — Set OAuth Policies
 
 1. In App Manager, find your Connected App and click **Manage**
 2. Click **Edit Policies**
-3. Set **Permitted Users** to `All users may self-authorize` (or `Admin approved users` if you want to restrict access)
+3. Set **Permitted Users** to `All users may self-authorize`
 4. Set **IP Relaxation** to `Relax IP restrictions`
 5. Click **Save**
 
 ---
 
-## Step 4 — Run the Assessment
+## Running the Assessment (Both Paths)
 
 1. Open **https://agentforce-readiness.onrender.com** in your browser
 2. Enter the following:
 
    | Field | Value |
    |-------|-------|
-   | Org / Sandbox URL | The customer's My Domain URL, e.g. `https://customername--sandboxname.sandbox.my.salesforce.com` |
-   | Client ID (Consumer Key) | Copied from Step 2 |
-   | Client Secret (Consumer Secret) | Copied from Step 2 |
+   | Org / Sandbox URL | The customer's My Domain URL — see format guide below |
+   | Client ID (Consumer Key) | Copied from your app setup |
+   | Client Secret (Consumer Secret) | Copied from your app setup |
 
 3. Click **Connect to Salesforce**
-4. Log in with your Salesforce credentials on the Salesforce login page
-5. Click **Allow** when prompted to grant access
-6. The assessment dashboard will load automatically and run all 20 checks
+4. Log in with your Salesforce credentials
+5. Click **Allow** when prompted
+6. The dashboard loads automatically and runs all 20 checks
 
 ---
 
-## Step 5 — Review Results and Export
+## Reviewing Results and Exporting
 
-- The **radar chart** gives an at-a-glance view of readiness across all 20 categories
-- Each category card shows the auto-check findings and score (Green ≥80%, Amber 50–79%, Red <50%)
-- The **Remediation Backlog** at the bottom lists all failing checks in priority order
-- Click **Export PDF** to generate a report to share with the customer
+- The **radar chart** gives an at-a-glance view across all 20 categories
+- Each category shows auto-check findings and a score (Green ≥80%, Amber 50–79%, Red <50%)
+- The **Remediation Backlog** lists all failing checks in priority order
+- Click **Export PDF** to generate a report for the customer
 
 ---
 
@@ -92,17 +149,17 @@ This guide walks you through connecting the Agentforce Readiness Assessment app 
 | Developer Edition | `https://companyname.develop.my.salesforce.com` |
 | Production | `https://companyname.my.salesforce.com` |
 
-> **Tip:** The correct URL is found in the browser address bar when logged into the org — use the domain that ends in `.salesforce.com`, not `.salesforce-setup.com`.
+> **Tip:** Find the correct URL in the browser address bar when logged into the org. Use the domain ending in `.salesforce.com` — not `.salesforce-setup.com`.
 
 ---
 
 ## Required Permissions
 
-The user logging in must have sufficient permissions to query the objects the app checks. A **System Administrator** profile will work for all checks. If using a non-admin user, they need at minimum:
+A **System Administrator** profile will work for all 20 checks. If using a non-admin user, they need at minimum:
 
 - API Enabled
 - View Setup and Configuration
-- View All Data (for full results across all categories)
+- View All Data
 
 ---
 
@@ -110,10 +167,11 @@ The user logging in must have sufficient permissions to query the objects the ap
 
 | Issue | Fix |
 |-------|-----|
-| Redirected back to login with no error | Wait 5–10 minutes for the Connected App to fully activate, then try again |
-| `error=invalid_client` | Double-check the Consumer Key and Secret — copy them fresh from Manage Consumer Details |
-| `error=redirect_uri_mismatch` | Verify the Callback URL in the Connected App is exactly `https://agentforce-readiness.onrender.com/auth/callback` |
-| `error=missing required code challenge` | PKCE is enabled — uncheck it in the Connected App OAuth settings |
+| Redirected back to login with no error | Wait 5–10 minutes for the app to activate, then try again |
+| `error=invalid_client` | Copy the Consumer Key and Secret fresh from Manage Consumer Details |
+| `error=redirect_uri_mismatch` | Verify the Callback URL is exactly `https://agentforce-readiness.onrender.com/auth/callback` |
+| `error=missing required code challenge` | PKCE is enabled — uncheck it in OAuth settings |
+| Can't find "External Client Apps" in Setup | Your org uses the classic path — follow Option B instead |
 | Dashboard loads but all categories show errors | The logged-in user lacks API access or View Setup and Configuration permission |
 | App takes 30+ seconds to load | Render free tier spins down after inactivity — first load may be slow, subsequent loads are fast |
 
@@ -121,8 +179,8 @@ The user logging in must have sufficient permissions to query the objects the ap
 
 ## Security Notes
 
-- The app never stores your Consumer Key, Secret, or access tokens permanently — they are held only in a server-side session that expires after 1 hour
-- The app is read-only — it queries org data but makes no changes
+- The app never stores Consumer Keys, Secrets, or access tokens permanently — held only in a server-side session that expires after 1 hour
+- The app is **read-only** — it queries org data but makes no changes
 - Each session is isolated — credentials entered by one user are not accessible to others
 
 ---
