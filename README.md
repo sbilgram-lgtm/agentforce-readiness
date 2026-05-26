@@ -2,6 +2,12 @@
 
 A web application that connects to a Salesforce org via OAuth and automatically scores its readiness to implement Agentforce across 20 architectural dimensions. Designed for Salesforce consultants conducting pre-implementation assessments.
 
+**Live app:** https://agentforce-readiness.onrender.com
+
+**Setup guide:** [docs/setup-guide.md](docs/setup-guide.md) — how to configure a Connected App in a customer org and run an assessment.
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/sbilgram-lgtm/agentforce-readiness)
+
 ---
 
 ## What It Does
