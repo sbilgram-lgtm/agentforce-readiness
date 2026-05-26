@@ -467,15 +467,26 @@ app.get('/api/assess/channels', requireAuth, async (req, res) => {
 app.get('/api/assess/console', requireAuth, async (req, res) => {
   try {
     const conn = getConn(req);
-    const apps = await safeQuery(conn, "SELECT Id, Name, DeveloperName, NavType FROM AppDefinition WHERE NavType = 'Console' LIMIT 20").catch(() => ({ records: [] }));
+    const [apps, omniWidget, knowledgeComponent] = await Promise.all([
+      safeQuery(conn, "SELECT Id, Name, DeveloperName, NavType FROM AppDefinition WHERE NavType = 'Console' LIMIT 20").catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT Id, DeveloperName FROM FlexiPage WHERE Type = 'UtilityBar' LIMIT 10").catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT Id, DeveloperName FROM FlexiPage WHERE Type IN ('RecordPage','AppPage') AND MasterLabel LIKE '%Service%' LIMIT 10").catch(() => ({ records: [] }))
+    ]);
 
+    const consoleAppsFound = (apps.records||[]).length;
+    const hasUtilityBar = (omniWidget.records||[]).length > 0;
+    const hasServicePage = (knowledgeComponent.records||[]).length > 0;
     const autoChecks = [
-      ac('ca_ac_1', 'At least one Lightning Console app exists', (apps.records||[]).length > 0, 'No Lightning Console apps found — agents will not have a console workspace for escalated case handling')
+      ac('ca_ac_1', 'At least one Lightning Console app exists', consoleAppsFound > 0, 'No Lightning Console apps found — agents will not have a console workspace for escalated case handling'),
+      ac('ca_ac_2', 'Utility bar pages exist (Omni-Channel widget support)', hasUtilityBar, 'No utility bar FlexiPages found — Omni-Channel widget cannot be surfaced for human agents handling escalations'),
+      ac('ca_ac_3', 'Service-related Lightning pages are configured', hasServicePage, 'No Service-related Lightning pages found — human agents may lack the correct page layout after Agentforce escalation')
     ];
 
     res.json({
       category: 'Console App and Agent Workspace Readiness',
-      consoleAppsFound: (apps.records || []).length,
+      consoleAppsFound,
+      hasUtilityBar,
+      hasServicePage,
       consoleApps: apps.records || [],
       autoChecks,
       questions: [
@@ -494,18 +505,25 @@ app.get('/api/assess/console', requireAuth, async (req, res) => {
 app.get('/api/assess/lightning-pages', requireAuth, async (req, res) => {
   try {
     const conn = getConn(req);
-    const [flexiPages, dynamicForms] = await Promise.all([
+    const [flexiPages, caseRecordPages, dynamicActions] = await Promise.all([
       safeQuery(conn, "SELECT Id, DeveloperName, EntityDefinitionId, Type FROM FlexiPage WHERE Type IN ('RecordPage','AppPage') LIMIT 50").catch(() => ({ records: [] })),
-      safeQuery(conn, "SELECT Id, DeveloperName FROM FlexiPage WHERE Type = 'RecordPage' LIMIT 50").catch(() => ({ records: [] }))
+      safeQuery(conn, "SELECT Id, DeveloperName FROM FlexiPage WHERE Type = 'RecordPage' AND MasterLabel LIKE '%Case%' LIMIT 10").catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT Id, DeveloperName FROM FlexiPage WHERE Type = 'RecordPage' LIMIT 1").catch(() => ({ records: [] }))
     ]);
 
+    const recordPagesCount = (flexiPages.records||[]).length;
+    const hasCasePage = (caseRecordPages.records||[]).length > 0;
+    const hasRecordPages = (dynamicActions.records||[]).length > 0;
     const autoChecks = [
-      ac('lp_ac_1', 'Lightning record pages exist', (flexiPages.records||[]).length > 0, 'No custom Lightning record pages found — agents and human users may rely on default layouts without proper field/action configuration')
+      ac('lp_ac_1', 'Lightning record pages exist', recordPagesCount > 0, 'No custom Lightning record pages found — agents and human users may rely on default layouts without proper field/action configuration'),
+      ac('lp_ac_2', 'Case record page is customised for agent workspace', hasCasePage, 'No Case-specific Lightning record page found — human agents handling escalated cases may lack optimised field and action layout'),
+      ac('lp_ac_3', 'Multiple record pages configured across objects', recordPagesCount >= 3, `Only ${recordPagesCount} record page(s) found — ensure all objects the agent touches have reviewed Lightning pages`)
     ];
 
     res.json({
       category: 'Lightning Record Pages, Dynamic Forms, Dynamic Actions, and UX',
-      recordPagesCount: (flexiPages.records || []).length,
+      recordPagesCount,
+      hasCasePage,
       autoChecks,
       questions: [
         { id: 'lp_1', text: 'Are Lightning record pages reviewed for all objects the agent touches or hands off to users?', type: 'boolean' },
@@ -607,17 +625,20 @@ app.get('/api/assess/agentforce-builder', requireAuth, async (req, res) => {
 app.get('/api/assess/experience-cloud', requireAuth, async (req, res) => {
   try {
     const conn = getConn(req);
-    const [sites, networks, guestUserSharing] = await Promise.all([
+    const [sites, networks, guestUserSharing, guestUsers] = await Promise.all([
       safeQuery(conn, "SELECT Id, Name, Status, UrlPathPrefix FROM Site WHERE Status IN ('Active','InMaintenance') LIMIT 20").catch(() => ({ records: [] })),
       safeQuery(conn, 'SELECT Id, Name, Status FROM Network LIMIT 20').catch(() => ({ records: [] })),
-      safeQuery(conn, "SELECT Id, Name FROM SharingSet LIMIT 20").catch(() => ({ records: [] }))
+      safeQuery(conn, "SELECT Id, Name FROM SharingSet LIMIT 20").catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT Id, Name, IsActive FROM User WHERE UserType = 'Guest' AND IsActive = true LIMIT 10").catch(() => ({ records: [] }))
     ]);
 
     const sitesExist = (sites.records||[]).length > 0;
     const sharingSetsExist = (guestUserSharing.records||[]).length > 0;
+    const guestUsersCount = (guestUsers.records||[]).length;
     const autoChecks = [
       ac('ec_ac_1', 'Experience Cloud sites exist', sitesExist, 'No active Experience Cloud sites found — if external user access is in scope, site configuration is required'),
-      ac('ec_ac_2', 'Sharing Sets are configured', sharingSetsExist, 'No Sharing Sets found — external user record access for Experience Cloud portals is not configured')
+      ac('ec_ac_2', 'Sharing Sets are configured', sharingSetsExist, 'No Sharing Sets found — external user record access for Experience Cloud portals is not configured'),
+      ac('ec_ac_3', 'Guest users are active (Experience Cloud in use)', guestUsersCount > 0, 'No active guest users found — Experience Cloud external access may not be configured or in use')
     ];
 
     res.json({
@@ -625,6 +646,7 @@ app.get('/api/assess/experience-cloud', requireAuth, async (req, res) => {
       activeSitesCount: (sites.records || []).length,
       networksCount: (networks.records || []).length,
       sharingSetsCount: (guestUserSharing.records || []).length,
+      guestUsersCount,
       sites: sites.records || [],
       autoChecks,
       questions: [
@@ -683,16 +705,19 @@ app.get('/api/assess/integrations', requireAuth, async (req, res) => {
 app.get('/api/assess/data-cloud', requireAuth, async (req, res) => {
   try {
     const conn = getConn(req);
-    const [dataCloudSetting, dataLibraries] = await Promise.all([
+    const [dataCloudSetting, dataLibraries, externalServices] = await Promise.all([
       safeQuery(conn, "SELECT SettingName, SettingValue FROM OrganizationSetting WHERE SettingName = 'DataCloudEnabled' LIMIT 1").catch(() => ({ records: [] })),
-      safeQuery(conn, 'SELECT Id, DeveloperName, Type FROM AgentforceDataLibrary LIMIT 20').catch(() => ({ records: [] }))
+      safeQuery(conn, 'SELECT Id, DeveloperName, Type FROM AgentforceDataLibrary LIMIT 20').catch(() => ({ records: [] })),
+      safeQuery(conn, 'SELECT Id, DeveloperName, Status FROM ExternalServiceRegistration WHERE Status = \'Complete\' LIMIT 10').catch(() => ({ records: [] }))
     ]);
 
     const dataCloudEnabled = (dataCloudSetting.records || [])[0]?.SettingValue === 'true';
     const dataLibrariesCount = (dataLibraries.records || []).length;
+    const externalServicesCount = (externalServices.records || []).length;
     const autoChecks = [
       ac('dc_ac_1', 'Data Cloud is provisioned and enabled', dataCloudEnabled, 'Data Cloud is not enabled in org settings — Data 360 grounding for Agentforce requires Data Cloud'),
-      ac('dc_ac_2', 'Agentforce Data Libraries are configured', dataLibrariesCount > 0, 'No Agentforce Data Libraries found — unstructured data grounding for agents is not configured')
+      ac('dc_ac_2', 'Agentforce Data Libraries are configured', dataLibrariesCount > 0, 'No Agentforce Data Libraries found — unstructured data grounding for agents is not configured'),
+      ac('dc_ac_3', 'External Service Registrations are complete', externalServicesCount > 0, 'No completed External Service Registrations found — OpenAPI-based external data connections for agent grounding are not set up')
     ];
 
     res.json({
@@ -755,12 +780,20 @@ app.get('/api/assess/testing', requireAuth, async (req, res) => {
 app.get('/api/assess/observability', requireAuth, async (req, res) => {
   try {
     const conn = getConn(req);
-    const eventLogFiles = await safeQuery(conn, "SELECT Id, EventType, CreatedDate FROM EventLogFile WHERE EventType IN ('AgentforceSession','EinsteinGPTGeneration','AgentforceAction','EinsteinGenerativeAI') ORDER BY CreatedDate DESC LIMIT 20").catch(() => ({ records: [] }));
+    const [eventLogFiles, promptInteractions, reportCount] = await Promise.all([
+      safeQuery(conn, "SELECT Id, EventType, CreatedDate FROM EventLogFile WHERE EventType IN ('AgentforceSession','EinsteinGPTGeneration','AgentforceAction','EinsteinGenerativeAI') ORDER BY CreatedDate DESC LIMIT 20").catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT COUNT() FROM GenAiPromptInteraction LIMIT 1").catch(() => ({ totalSize: 0 })),
+      safeQuery(conn, "SELECT COUNT() FROM Report LIMIT 1").catch(() => ({ totalSize: 0 }))
+    ]);
 
     const eventLogFilesFound = (eventLogFiles.records || []).length;
+    const hasPromptInteractions = (promptInteractions.totalSize || 0) > 0;
+    const hasReports = (reportCount.totalSize || 0) > 0;
     const autoChecks = [
       ac('obs_ac_1', 'Agentforce or Einstein event log files exist', eventLogFilesFound > 0, 'No Agentforce/Einstein event log files found — AI session observability data is not being captured'),
-      ac('obs_ac_2', 'Event log files are recent (last 7 days)', (eventLogFiles.records||[]).some(e => new Date(e.CreatedDate) > new Date(Date.now() - 7*24*60*60*1000)), 'No recent (last 7 days) Agentforce/Einstein event logs — verify monitoring is active')
+      ac('obs_ac_2', 'Event log files are recent (last 7 days)', (eventLogFiles.records||[]).some(e => new Date(e.CreatedDate) > new Date(Date.now() - 7*24*60*60*1000)), 'No recent (last 7 days) Agentforce/Einstein event logs — verify monitoring is active'),
+      ac('obs_ac_3', 'Prompt interaction data is being captured (GenAiPromptInteraction)', hasPromptInteractions, 'No GenAiPromptInteraction records found — prompt-level observability is not yet active (requires live agent usage)'),
+      ac('obs_ac_4', 'Reports exist for operational monitoring', hasReports, 'No reports found — operational dashboards for agent performance monitoring have not been built')
     ];
 
     res.json({
