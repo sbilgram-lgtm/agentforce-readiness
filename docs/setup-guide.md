@@ -50,7 +50,7 @@ Salesforce introduced **External Client Apps** in Spring '25 as the new way to c
      - `Access and manage your data (api)`
      - `Perform requests on your behalf at any time (refresh_token, offline_access)`
    - **Client Credentials Flow:** Leave disabled
-   - **Require Proof Key for Code Exchange (PKCE):** Leave **unchecked**
+   - **Require Proof Key for Code Exchange (PKCE):** Leave **unchecked** ⚠️ This must be OFF — if enabled, the app will fail with a `missing required code challenge` error
 2. Click **Save**
 
 > **Note:** Allow 2–10 minutes for the app to activate after saving.
@@ -92,7 +92,7 @@ Salesforce introduced **External Client Apps** in Spring '25 as the new way to c
    - **Selected OAuth Scopes:** Add both:
      - `Access and manage your data (api)`
      - `Perform requests on your behalf at any time (refresh_token, offline_access)`
-   - **Require Proof Key for Code Exchange (PKCE):** Leave **unchecked**
+   - **Require Proof Key for Code Exchange (PKCE):** Leave **unchecked** ⚠️ This must be OFF — if enabled, the app will fail with a `missing required code challenge` error
 
 4. Click **Save** → Click **Continue**
 
@@ -170,7 +170,7 @@ A **System Administrator** profile will work for all 20 checks. If using a non-a
 | Redirected back to login with no error | Wait 5–10 minutes for the app to activate, then try again |
 | `error=invalid_client` | Copy the Consumer Key and Secret fresh from Manage Consumer Details |
 | `error=redirect_uri_mismatch` | Verify the Callback URL is exactly `https://agentforce-readiness.onrender.com/auth/callback` |
-| `error=missing required code challenge` | PKCE is enabled — uncheck it in OAuth settings |
+| `error=missing required code challenge` | PKCE is enabled on your app — go to Setup → External Client Apps (or App Manager for classic) → find your app → Edit → uncheck **Require Proof Key for Code Exchange (PKCE)** → Save. Wait 5 minutes then retry. |
 | Can't find "External Client Apps" in Setup | Your org uses the classic path — follow Option B instead |
 | Dashboard loads but all categories show errors | The logged-in user lacks API access or View Setup and Configuration permission |
 | App takes 30+ seconds to load | Render free tier spins down after inactivity — first load may be slow, subsequent loads are fast |
