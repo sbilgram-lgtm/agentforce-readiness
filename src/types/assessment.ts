@@ -35,7 +35,7 @@ export interface AssessmentReport {
   summary: string;
 }
 
-// Category IDs for all 22 areas
+// Category IDs for all 24 areas
 export const CATEGORY_IDS = [
   'licensing',
   'security-model',
@@ -56,7 +56,11 @@ export const CATEGORY_IDS = [
   'observability',
   'devops',
   'performance',
-  'compliance'
+  'compliance',
+  'agent-design',
+  'prompt-engineering',
+  'escalation',
+  'middleware'
 ] as const;
 
 export type CategoryId = typeof CATEGORY_IDS[number];
@@ -81,5 +85,9 @@ export const CATEGORY_LABELS: Record<CategoryId, string> = {
   'observability': 'Observability & Audit',
   'devops': 'DevOps & ALM',
   'performance': 'Performance, Scalability & Limits',
-  'compliance': 'Compliance, Privacy & Legal'
+  'compliance': 'Compliance, Privacy & Legal',
+  'agent-design': 'Agent Design & Use Case Readiness',
+  'prompt-engineering': 'Prompt Engineering & Grounding',
+  'escalation': 'Escalation & Handoff Architecture',
+  'middleware': 'Middleware & External API Readiness'
 };

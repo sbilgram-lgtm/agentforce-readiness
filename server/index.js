@@ -158,11 +158,20 @@ app.get('/api/assess/licensing', requireAuth, async (req, res) => {
     const settings = {};
     (orgSettingsRes.records || []).forEach(r => { settings[r.SettingName] = r.SettingValue; });
     const einsteinEnabled = settings['EinsteinGptEnabled'] === 'true' || settings['EinsteinGenerativeAIEnabled'] === 'true';
+    const [licPSA, licEinsteinQuota] = await Promise.all([
+      safeQuery(conn, "SELECT COUNT() FROM PermissionSetAssignment WHERE PermissionSet.Name LIKE '%Agentforce%' AND Assignee.IsActive = true").catch(() => ({ totalSize: 0 })),
+      safeRest(conn, '/services/data/v62.0/limits/').catch(() => ({}))
+    ]);
+    const agentforcePSACount = licPSA.totalSize || 0;
+    const einsteinQuotaLimit = (licEinsteinQuota && licEinsteinQuota.DailyEinsteinRequests) ? licEinsteinQuota.DailyEinsteinRequests : null;
+
     const autoChecks = [
       ac('lic_ac_1', 'Einstein Generative AI is enabled', einsteinEnabled, 'Einstein Generative AI is not enabled in org settings'),
       ac('lic_ac_2', 'Agentforce is enabled', settings['AgentforceEnabled'] === 'true', 'Agentforce is not enabled in org settings'),
       ac('lic_ac_3', 'Data Cloud is enabled', settings['DataCloudEnabled'] === 'true', 'Data Cloud is not enabled in org settings'),
-      ac('lic_ac_4', 'A permission set with Manage AI Agents exists', (manageAIAgentsPS.records || []).length > 0, 'No permission set found with Manage AI Agents — admin cannot manage agents')
+      ac('lic_ac_4', 'A permission set with Manage AI Agents exists', (manageAIAgentsPS.records || []).length > 0, 'No permission set found with Manage AI Agents — admin cannot manage agents'),
+      ac('lic_ac_5', 'Active users have Agentforce permission set assigned', agentforcePSACount > 0, 'No active users assigned an Agentforce permission set — licensing may not be activated for any user'),
+      ac('lic_ac_6', 'Einstein/Agentforce AI request quota is provisioned', !!(einsteinQuotaLimit && einsteinQuotaLimit.Max > 0), 'DailyEinsteinRequests limit not found — Agentforce AI quota may not be provisioned for this org')
     ];
 
     res.json({
@@ -205,10 +214,19 @@ app.get('/api/assess/security-model', requireAuth, async (req, res) => {
     const caseNotPublicRW = !caseOwd || caseOwd.DefaultInternalAccess !== 'ReadWrite';
     const noViewAllData = (viewAllDataPS.records || []).length === 0;
     const hasRestrictionRules = (restrictionRulesRes.records || []).length > 0;
+    const [publicRWExternalObjects, loginIpRanges] = await Promise.all([
+      safeRest(conn, "/services/data/v62.0/tooling/query/?q=SELECT+QualifiedApiName,DefaultExternalAccess+FROM+EntityDefinition+WHERE+DefaultExternalAccess='ReadWrite'+LIMIT+5").catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT COUNT() FROM LoginIpRange LIMIT 1").catch(() => ({ totalSize: 0 }))
+    ]);
+    const noPublicRWExternal = (publicRWExternalObjects.records || []).length === 0;
+    const hasLoginIpRanges = (loginIpRanges.totalSize || 0) > 0;
+
     const autoChecks = [
       ac('sec_ac_1', 'Case OWD is not Public Read/Write', caseNotPublicRW, 'Case OWD is Public Read/Write — agent may over-expose case data to all users'),
       ac('sec_ac_2', 'No custom permission sets grant View All Data', noViewAllData, `${(viewAllDataPS.records||[]).length} custom permission set(s) grant View All Data — verify agent user is not assigned these`),
-      ac('sec_ac_3', 'Restriction rules are configured', hasRestrictionRules, 'No restriction rules found — consider scoping rules to limit agent record visibility')
+      ac('sec_ac_3', 'Restriction rules are configured', hasRestrictionRules, 'No restriction rules found — consider scoping rules to limit agent record visibility'),
+      ac('sec_ac_4', 'No objects have Public Read/Write external (guest) access', noPublicRWExternal, 'Objects have Public Read/Write external access — guest users and agent external deployments may over-expose data'),
+      ac('sec_ac_5', 'Login IP ranges are configured', hasLoginIpRanges, 'No login IP ranges configured — consider restricting agent user login to known IP ranges')
     ];
 
     res.json({
@@ -241,12 +259,21 @@ app.get('/api/assess/agent-user', requireAuth, async (req, res) => {
 
     const intUsers = (integrationUsers.records || []).filter(u => u.UserType !== 'Standard');
 
-    const modifyAllPS = await safeQuery(conn, "SELECT Id, Name FROM PermissionSet WHERE PermissionsModifyAllData = true AND IsCustom = true LIMIT 10").catch(() => ({ records: [] }));
+    const [modifyAllPS, autoProcUsers, runFlowPS] = await Promise.all([
+      safeQuery(conn, "SELECT Id, Name FROM PermissionSet WHERE PermissionsModifyAllData = true AND IsCustom = true LIMIT 10").catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT COUNT() FROM User WHERE UserType = 'AutoProc' AND IsActive = true").catch(() => ({ totalSize: 0 })),
+      safeQuery(conn, "SELECT COUNT() FROM PermissionSet WHERE PermissionsRunFlow = true AND IsCustom = true LIMIT 1").catch(() => ({ totalSize: 0 }))
+    ]);
     const noModifyAll = (modifyAllPS.records || []).length === 0;
+    const hasAutoProcUser = (autoProcUsers.totalSize || 0) > 0;
+    const hasRunFlowPS = (runFlowPS.totalSize || 0) > 0;
+
     const autoChecks = [
       ac('au_ac_1', 'Integration or automation users exist', intUsers.length > 0, 'No integration/automation users found — define a dedicated agent user with scoped permissions'),
       ac('au_ac_2', 'No custom permission sets grant Modify All Data', noModifyAll, `${(modifyAllPS.records||[]).length} custom permission set(s) grant Modify All Data — verify the agent user does not inherit these`),
-      ac('au_ac_3', 'Permission Set Groups are defined', (permSetGroups.records||[]).length > 0, 'No Permission Set Groups found — use PSGs to manage least-privilege permission bundles for agent users')
+      ac('au_ac_3', 'Permission Set Groups are defined', (permSetGroups.records||[]).length > 0, 'No Permission Set Groups found — use PSGs to manage least-privilege permission bundles for agent users'),
+      ac('au_ac_4', 'Agentforce Bot User (AutoProc) exists', hasAutoProcUser, 'No AutoProc user type found — a dedicated Agentforce bot user has not been provisioned'),
+      ac('au_ac_5', 'A permission set grants Run Flows (required for agent actions)', hasRunFlowPS, 'No custom permission set grants Run Flows — agent actions using flows will fail without this permission')
     ];
 
     res.json({
@@ -282,10 +309,19 @@ app.get('/api/assess/trust-layer', requireAuth, async (req, res) => {
     const einsteinEnabled = (einsteinSettingRes.records || [])[0]?.SettingValue === 'true';
     const hasClassifiedFields = (classifiedFieldCheck.records || []).length > 0;
     const hasSensitiveFieldsClassified = (sensitiveFields.records || []).length > 0;
+    const [trustLayerSetting, promptTemplatesForETL] = await Promise.all([
+      safeQuery(conn, "SELECT COUNT() FROM OrganizationSetting WHERE SettingName = 'TrustLayerEnabled' LIMIT 1").catch(() => ({ totalSize: 0 })),
+      safeQuery(conn, "SELECT COUNT() FROM PromptTemplate LIMIT 1").catch(() => ({ totalSize: 0 }))
+    ]);
+    const hasTrustLayerSetting = (trustLayerSetting.totalSize || 0) > 0;
+    const hasPromptTemplates = (promptTemplatesForETL.totalSize || 0) > 0;
+
     const autoChecks = [
       ac('etl_ac_1', 'Einstein Generative AI is enabled (Trust Layer prerequisite)', einsteinEnabled, 'Einstein Generative AI is not enabled — the Einstein Trust Layer requires this to be active'),
       ac('etl_ac_2', 'Salesforce Data Classification is applied to fields', hasClassifiedFields, 'No fields have data classification applied — field-level AI masking in prompts cannot function without classification'),
-      ac('etl_ac_3', 'PII/PHI/Sensitive fields are tagged with data classification', hasSensitiveFieldsClassified, 'No PII/PHI/sensitive-classified fields found — ensure all regulated fields are classified so Trust Layer can mask them')
+      ac('etl_ac_3', 'PII/PHI/Sensitive fields are tagged with data classification', hasSensitiveFieldsClassified, 'No PII/PHI/sensitive-classified fields found — ensure all regulated fields are classified so Trust Layer can mask them'),
+      ac('etl_ac_4', 'Trust Layer org setting is present', hasTrustLayerSetting, 'TrustLayerEnabled setting not found — verify Einstein Trust Layer is fully activated'),
+      ac('etl_ac_5', 'Prompt templates exist (grounding prompts configured)', hasPromptTemplates, 'No prompt templates found — agent grounding and action prompts are not yet defined')
     ];
 
     res.json({
@@ -322,10 +358,19 @@ app.get('/api/assess/data-quality', requireAuth, async (req, res) => {
     const missingCount = missingDescCount.totalSize || 0;
     const totalCount = totalCustomCount.totalSize || 1;
     const missingRatio = missingCount / totalCount;
+    const [caseRecordTypes, requiredCustomFields] = await Promise.all([
+      safeQuery(conn, "SELECT COUNT() FROM RecordType WHERE SobjectType = 'Case' AND IsActive = true LIMIT 1").catch(() => ({ totalSize: 0 })),
+      safeQuery(conn, "SELECT COUNT() FROM FieldDefinition WHERE QualifiedApiName LIKE '%__c' AND IsRequired = true LIMIT 1").catch(() => ({ totalSize: 0 }))
+    ]);
+    const hasCaseRecordTypes = (caseRecordTypes.totalSize || 0) > 0;
+    const hasRequiredCustomFields = (requiredCustomFields.totalSize || 0) > 0;
+
     const autoChecks = [
       ac('dq_ac_1', 'Active duplicate rules exist', duplicateRulesActive > 0, 'No active duplicate rules — duplicate records will degrade agent reasoning and grounding accuracy'),
       ac('dq_ac_2', 'Custom field description coverage is adequate (>70%)', missingRatio < 0.30, `${Math.round(missingRatio * 100)}% of custom fields are missing descriptions — agents cannot understand field purpose without metadata`),
-      ac('dq_ac_3', 'Agentforce Data Libraries are configured', (dataLibraries.records||[]).length > 0, 'No Agentforce Data Libraries found — unstructured data and knowledge grounding is not yet configured')
+      ac('dq_ac_3', 'Agentforce Data Libraries are configured', (dataLibraries.records||[]).length > 0, 'No Agentforce Data Libraries found — unstructured data and knowledge grounding is not yet configured'),
+      ac('dq_ac_4', 'Case record types are configured', hasCaseRecordTypes, 'No active Case record types found — agents need record type context to correctly classify and route cases'),
+      ac('dq_ac_5', 'Required custom fields are defined on key objects', hasRequiredCustomFields, 'No required custom fields found — data completeness for agent grounding cannot be enforced')
     ];
 
     res.json({
@@ -361,10 +406,19 @@ app.get('/api/assess/knowledge', requireAuth, async (req, res) => {
     const publishedArticles = articles.totalSize || 0;
     const archivedArticles2 = archivedArticles.totalSize || 0;
     const articleTypesCount = knowledgeEnabled.totalSize !== undefined ? 1 : 0;
+    const [staleArticles, dataCategories] = await Promise.all([
+      safeQuery(conn, "SELECT COUNT() FROM KnowledgeArticleVersion WHERE PublishStatus = 'Online' AND LastModifiedDate < LAST_N_YEARS:2 LIMIT 1").catch(() => ({ totalSize: 0 })),
+      safeQuery(conn, "SELECT COUNT() FROM DataCategory LIMIT 1").catch(() => ({ totalSize: 0 }))
+    ]);
+    const noStaleArticles = (staleArticles.totalSize || 0) === 0;
+    const hasDataCategories = (dataCategories.totalSize || 0) > 0;
+
     const autoChecks = [
       ac('km_ac_1', 'Knowledge (Lightning) is enabled', publishedArticles > 0 || knowledgeEnabled.totalSize !== undefined, 'Knowledge is not enabled — agents cannot ground on Knowledge articles'),
       ac('km_ac_2', 'Published Knowledge articles exist', publishedArticles > 0, 'No published Knowledge articles — agent has no content to ground on'),
-      ac('km_ac_3', 'Archive ratio is healthy (published >= archived)', publishedArticles >= archivedArticles2, `Archived articles (${archivedArticles2}) exceed published (${publishedArticles}) — article lifecycle governance may be needed`)
+      ac('km_ac_3', 'Archive ratio is healthy (published >= archived)', publishedArticles >= archivedArticles2, `Archived articles (${archivedArticles2}) exceed published (${publishedArticles}) — article lifecycle governance may be needed`),
+      ac('km_ac_4', 'Knowledge articles are current (no articles >2 years old)', noStaleArticles, 'Published Knowledge articles are more than 2 years old — stale content degrades agent grounding quality'),
+      ac('km_ac_5', 'Knowledge data categories are configured', hasDataCategories, 'No Knowledge data categories found — agents use data categories for topic scoping and article retrieval')
     ];
 
     res.json({
@@ -398,11 +452,20 @@ app.get('/api/assess/omni-channel', requireAuth, async (req, res) => {
     ]);
 
     const activePresenceStatuses = (presenceStatuses.records || []).filter(p => p.IsActive).length;
+    const [messagingServiceChannel, availabilityRouting] = await Promise.all([
+      safeQuery(conn, "SELECT COUNT() FROM ServiceChannel WHERE RelatedEntityType = 'LiveChatTranscript' OR RelatedEntityType = 'MessagingSession' LIMIT 1").catch(() => ({ totalSize: 0 })),
+      safeQuery(conn, "SELECT COUNT() FROM RoutingConfig WHERE RoutingModel = 'MostAvailable' OR RoutingModel = 'LeastActive' LIMIT 1").catch(() => ({ totalSize: 0 }))
+    ]);
+    const hasMessagingServiceChannel = (messagingServiceChannel.totalSize || 0) > 0;
+    const hasAvailabilityRouting = (availabilityRouting.totalSize || 0) > 0;
+
     const autoChecks = [
       ac('oc_ac_1', 'Service channels are configured', (serviceChannels.records||[]).length > 0, 'No Omni-Channel service channels found — Omni-Channel routing is not set up'),
       ac('oc_ac_2', 'Queues are configured for work routing', (queues.records||[]).length > 0, 'No queues found — work items cannot be routed to Agentforce or human agents'),
       ac('oc_ac_3', 'Routing configurations exist', (routingConfigs.records||[]).length > 0, 'No routing configurations found — Omni-Channel routing rules are incomplete'),
-      ac('oc_ac_4', 'Active presence statuses are defined', activePresenceStatuses > 0, 'No active presence statuses — agent availability for Omni-Channel is not configured')
+      ac('oc_ac_4', 'Active presence statuses are defined', activePresenceStatuses > 0, 'No active presence statuses — agent availability for Omni-Channel is not configured'),
+      ac('oc_ac_5', 'A messaging or chat service channel is configured for Agentforce', hasMessagingServiceChannel, 'No messaging/chat service channel found — Agentforce Service Agent requires a messaging or chat channel'),
+      ac('oc_ac_6', 'Skill or availability-based routing is configured', hasAvailabilityRouting, 'No availability-based routing configurations found — consider skills-based routing for optimal agent/human capacity')
     ];
 
     res.json({
@@ -438,10 +501,19 @@ app.get('/api/assess/channels', requireAuth, async (req, res) => {
 
     const embeddedDeploymentsCount = (embeddedServiceDeployments.records || []).length;
     const activeMessagingCount = (messagingChannels.records || []).filter(c => c.IsActive).length;
+    const [embeddedServiceConfigs, activeChatMessagingChannels] = await Promise.all([
+      safeQuery(conn, "SELECT COUNT() FROM EmbeddedServiceConfig LIMIT 1").catch(() => ({ totalSize: 0 })),
+      safeQuery(conn, "SELECT COUNT() FROM MessagingChannel WHERE IsActive = true AND (Type = 'EmbeddedMessaging' OR Type = 'WebChat') LIMIT 1").catch(() => ({ totalSize: 0 }))
+    ]);
+    const hasEmbeddedServiceConfig = (embeddedServiceConfigs.totalSize || 0) > 0;
+    const hasActiveChatChannel = (activeChatMessagingChannels.totalSize || 0) > 0;
+
     const autoChecks = [
       ac('ch_ac_1', 'Messaging channels are configured', (messagingChannels.records||[]).length > 0, 'No messaging channels configured — Agentforce Service Agent cannot be deployed to messaging channels'),
       ac('ch_ac_2', 'Active messaging channels exist', activeMessagingCount > 0, `${(messagingChannels.records||[]).length} messaging channel(s) found but none are active`),
-      ac('ch_ac_3', 'Embedded service deployments exist', embeddedDeploymentsCount > 0, 'No embedded service deployments — web chat/Enhanced Chat channel deployment is not configured')
+      ac('ch_ac_3', 'Embedded service deployments exist', embeddedDeploymentsCount > 0, 'No embedded service deployments — web chat/Enhanced Chat channel deployment is not configured'),
+      ac('ch_ac_4', 'Embedded Service configuration exists', hasEmbeddedServiceConfig, 'No Embedded Service configuration found — web chat deployment for Agentforce requires an Embedded Service config'),
+      ac('ch_ac_5', 'Enhanced Messaging or Web Chat channel is active', hasActiveChatChannel, 'No active Enhanced Messaging or Web Chat channel — Agentforce Service Agent requires one of these channel types')
     ];
 
     res.json({
@@ -476,10 +548,19 @@ app.get('/api/assess/console', requireAuth, async (req, res) => {
     const consoleAppsFound = (apps.records||[]).length;
     const hasUtilityBar = (omniWidget.records||[]).length > 0;
     const hasServicePage = (knowledgeComponent.records||[]).length > 0;
+    const [caseRecordPage, consoleAppPage] = await Promise.all([
+      safeQuery(conn, "SELECT COUNT() FROM FlexiPage WHERE Type = 'RecordPage' AND MasterLabel LIKE '%Case%' LIMIT 1").catch(() => ({ totalSize: 0 })),
+      safeQuery(conn, "SELECT COUNT() FROM FlexiPage WHERE Type = 'AppPage' AND MasterLabel LIKE '%Console%' LIMIT 1").catch(() => ({ totalSize: 0 }))
+    ]);
+    const hasCaseRecordPage = (caseRecordPage.totalSize || 0) > 0;
+    const hasConsoleAppPage = (consoleAppPage.totalSize || 0) > 0;
+
     const autoChecks = [
       ac('ca_ac_1', 'At least one Lightning Console app exists', consoleAppsFound > 0, 'No Lightning Console apps found — agents will not have a console workspace for escalated case handling'),
       ac('ca_ac_2', 'Utility bar pages exist (Omni-Channel widget support)', hasUtilityBar, 'No utility bar FlexiPages found — Omni-Channel widget cannot be surfaced for human agents handling escalations'),
-      ac('ca_ac_3', 'Service-related Lightning pages are configured', hasServicePage, 'No Service-related Lightning pages found — human agents may lack the correct page layout after Agentforce escalation')
+      ac('ca_ac_3', 'Service-related Lightning pages are configured', hasServicePage, 'No Service-related Lightning pages found — human agents may lack the correct page layout after Agentforce escalation'),
+      ac('ca_ac_4', 'Case record page exists for agent workspace', hasCaseRecordPage, 'No Case-specific record page — human agents handling escalated cases lack an optimised workspace'),
+      ac('ca_ac_5', 'Console app page is configured', hasConsoleAppPage, 'No Console app page found — the Service Console workspace may not be fully configured')
     ];
 
     res.json({
@@ -554,12 +635,21 @@ app.get('/api/assess/automation', requireAuth, async (req, res) => {
     const promptTemplatesCount = (promptTemplates.records || []).length;
     const invalidApexCount = (apexClasses.records || []).filter(c => !c.IsValid).length;
     const agentFunctionsCount = (agentFunctions.records || []).length;
+    const [flowsWithDescriptions, invocableApexClasses] = await Promise.all([
+      safeQuery(conn, "SELECT COUNT() FROM Flow WHERE ProcessType = 'AutoLaunchedFlow' AND Status = 'Active' AND Description != null LIMIT 1").catch(() => ({ totalSize: 0 })),
+      safeQuery(conn, "SELECT COUNT() FROM ApexClass WHERE Status = 'Active' AND Name LIKE '%Invocable%' LIMIT 1").catch(() => ({ totalSize: 0 }))
+    ]);
+    const hasFlowsWithDescriptions = (flowsWithDescriptions.totalSize || 0) > 0;
+    const hasInvocableApex = (invocableApexClasses.totalSize || 0) > 0;
+
     const autoChecks = [
       ac('auto_ac_1', 'Active AutoLaunchedFlows exist (candidate agent actions)', activeFlowsCount > 0, 'No active AutoLaunchedFlows found — no existing automation available to use as Agentforce actions'),
       ac('auto_ac_2', 'Apex classes use Spring \'23+ API versions (>=v56)', outdatedApexCount === 0, `${outdatedApexCount} Apex class(es) use API versions below v56 — upgrade before using as Agentforce invocable actions`),
       ac('auto_ac_3', 'Active prompt templates are configured', promptTemplatesCount > 0, 'No active prompt templates found — agent grounding prompts and action prompts are not yet defined'),
       ac('auto_ac_4', 'No invalid Apex classes', invalidApexCount === 0, `${invalidApexCount} Apex class(es) have compilation errors — fix before using as agent actions`),
-      ac('auto_ac_5', 'Agent actions (GenAiFunction) are configured', agentFunctionsCount > 0, 'No active GenAiFunction records found — no actions have been configured in Agentforce Builder yet')
+      ac('auto_ac_5', 'Agent actions (GenAiFunction) are configured', agentFunctionsCount > 0, 'No active GenAiFunction records found — no actions have been configured in Agentforce Builder yet'),
+      ac('auto_ac_6', 'Active flows have descriptions (agent action discoverability)', hasFlowsWithDescriptions, 'Active AutoLaunchedFlows lack descriptions — agents cannot discover undocumented flows as candidate actions'),
+      ac('auto_ac_7', 'Invocable Apex methods exist for agent actions', hasInvocableApex, 'No Apex classes with \'Invocable\' in the name found — confirm @InvocableMethod annotations exist for agent action candidates')
     ];
 
     res.json({
@@ -595,10 +685,17 @@ app.get('/api/assess/agentforce-builder', requireAuth, async (req, res) => {
 
     const agentsFound = (agents.records || []).length;
     const topicsFound = (topics.records || []).length;
+    const activeAgentsInBuilder = (agents.records || []).filter(a => a.Status === 'Active').length;
+
+    const activeGenAiFunctions = await safeQuery(conn, "SELECT COUNT() FROM GenAiFunction WHERE IsActive = true LIMIT 1").catch(() => ({ totalSize: 0 }));
+    const hasActiveGenAiFunctions = (activeGenAiFunctions.totalSize || 0) > 0;
+
     const autoChecks = [
       ac('ab_ac_1', 'Agentforce agents (Bot Definitions) are defined', agentsFound > 0, 'No Agentforce agents found — agent build has not started'),
       ac('ab_ac_2', 'Agent subagents/topics (GenAiPlugin) are defined', topicsFound > 0, 'No active GenAiPlugin records found — agents have no defined subagents or topics'),
-      ac('ab_ac_3', 'Topics-to-agents ratio suggests decomposition (>=1 topic per agent)', agentsFound > 0 && topicsFound >= agentsFound, agentsFound === 0 ? 'No agents found' : `${agentsFound} agent(s) but ${topicsFound} subagent(s) — ensure each agent has at least one topic scoped to a job-to-be-done`)
+      ac('ab_ac_3', 'Topics-to-agents ratio suggests decomposition (>=1 topic per agent)', agentsFound > 0 && topicsFound >= agentsFound, agentsFound === 0 ? 'No agents found' : `${agentsFound} agent(s) but ${topicsFound} subagent(s) — ensure each agent has at least one topic scoped to a job-to-be-done`),
+      ac('ab_ac_4', 'At least one agent is Active (not just Draft)', activeAgentsInBuilder > 0, 'No agents are in Active status — all defined agents are in Draft and cannot be deployed'),
+      ac('ab_ac_5', 'Active agent actions (GenAiFunction) are attached to topics', hasActiveGenAiFunctions, 'No active GenAiFunction records — topics have no actions configured and cannot execute tasks')
     ];
 
     res.json({
@@ -753,10 +850,20 @@ app.get('/api/assess/testing', requireAuth, async (req, res) => {
     const totalApexRes = await safeQuery(conn, "SELECT COUNT() FROM ApexClass WHERE Status = 'Active'").catch(() => ({ totalSize: 0 }));
     const totalApexCount = totalApexRes.totalSize || 0;
     const testRatio = totalApexCount > 0 ? apexTestClassesCount / totalApexCount : 0;
+
+    const [testingCenterFeedback, fullSandboxForTesting] = await Promise.all([
+      safeQuery(conn, "SELECT COUNT() FROM GenAiPlannerFeedback LIMIT 1").catch(() => ({ totalSize: 0 })),
+      safeQuery(conn, "SELECT COUNT() FROM SandboxInfo WHERE LicenseType IN ('FULL','PARTIAL') LIMIT 1").catch(() => ({ totalSize: 0 }))
+    ]);
+    const hasTestingCenterFeedback = (testingCenterFeedback.totalSize || 0) > 0;
+    const hasFullOrPartialSandbox = (fullSandboxForTesting.totalSize || 0) > 0;
+
     const autoChecks = [
       ac('test_ac_1', 'Org-wide Apex coverage meets 75% threshold', orgCoverage >= 75, `Org-wide Apex coverage is ${orgCoverage}% — below the 75% required for production deployment`),
       ac('test_ac_2', 'Apex test classes exist', apexTestClassesCount > 0, 'No Apex test classes found — automated testing is not established'),
-      ac('test_ac_3', 'Test class ratio is adequate (>=15% of classes)', testRatio >= 0.15, `Test class ratio is ${Math.round(testRatio * 100)}% — increase test coverage before Agentforce go-live`)
+      ac('test_ac_3', 'Test class ratio is adequate (>=15% of classes)', testRatio >= 0.15, `Test class ratio is ${Math.round(testRatio * 100)}% — increase test coverage before Agentforce go-live`),
+      ac('test_ac_4', 'Agentforce Testing Center has been used (GenAiPlannerFeedback exists)', hasTestingCenterFeedback, 'No Testing Center feedback records found — Agentforce Testing Center has not been used to evaluate agent accuracy'),
+      ac('test_ac_5', 'Full or Partial Copy sandbox exists for UAT/load testing', hasFullOrPartialSandbox, 'No Full or Partial Copy sandbox found — load and UAT testing for Agentforce requires production-scale data')
     ];
 
     res.json({
@@ -789,11 +896,21 @@ app.get('/api/assess/observability', requireAuth, async (req, res) => {
     const eventLogFilesFound = (eventLogFiles.records || []).length;
     const hasPromptInteractions = (promptInteractions.totalSize || 0) > 0;
     const hasReports = (reportCount.totalSize || 0) > 0;
+
+    const [dashboardCount, messagingSessionCount] = await Promise.all([
+      safeQuery(conn, "SELECT COUNT() FROM Dashboard LIMIT 1").catch(() => ({ totalSize: 0 })),
+      safeQuery(conn, "SELECT COUNT() FROM MessagingSession LIMIT 1").catch(() => ({ totalSize: 0 }))
+    ]);
+    const hasDashboards = (dashboardCount.totalSize || 0) > 0;
+    const hasMessagingSessions = (messagingSessionCount.totalSize || 0) > 0;
+
     const autoChecks = [
       ac('obs_ac_1', 'Agentforce or Einstein event log files exist', eventLogFilesFound > 0, 'No Agentforce/Einstein event log files found — AI session observability data is not being captured'),
       ac('obs_ac_2', 'Event log files are recent (last 7 days)', (eventLogFiles.records||[]).some(e => new Date(e.CreatedDate) > new Date(Date.now() - 7*24*60*60*1000)), 'No recent (last 7 days) Agentforce/Einstein event logs — verify monitoring is active'),
       ac('obs_ac_3', 'Prompt interaction data is being captured (GenAiPromptInteraction)', hasPromptInteractions, 'No GenAiPromptInteraction records found — prompt-level observability is not yet active (requires live agent usage)'),
-      ac('obs_ac_4', 'Reports exist for operational monitoring', hasReports, 'No reports found — operational dashboards for agent performance monitoring have not been built')
+      ac('obs_ac_4', 'Reports exist for operational monitoring', hasReports, 'No reports found — operational dashboards for agent performance monitoring have not been built'),
+      ac('obs_ac_5', 'Dashboards exist for operational monitoring', hasDashboards, 'No dashboards found — build operational dashboards for agent containment, handoff rate, and action success metrics'),
+      ac('obs_ac_6', 'Messaging session data is being captured', hasMessagingSessions, 'No MessagingSession records found — live conversation capture is not yet active (may require live agent usage)')
     ];
 
     res.json({
@@ -824,10 +941,16 @@ app.get('/api/assess/devops', requireAuth, async (req, res) => {
 
     const sandboxesFound = (sandboxes.records || []).length;
     const successfulDeploys = (deployments.records||[]).filter(d => d.Status === 'Succeeded');
+
+    const agentforceStaticResources = await safeQuery(conn, "SELECT COUNT() FROM StaticResource WHERE Name LIKE '%agentforce%' OR Name LIKE '%Agentforce%' OR Name LIKE '%agent%' LIMIT 1").catch(() => ({ totalSize: 0 }));
+    const hasAgentforceStaticResources = (agentforceStaticResources.totalSize || 0) > 0;
+
     const autoChecks = [
       ac('do_ac_1', 'Sandboxes exist (work is not all done in production)', sandboxesFound > 0, 'No sandboxes found — Agentforce development directly in production is extremely high risk'),
       ac('do_ac_2', 'Multiple sandboxes support a proper environment strategy', sandboxesFound >= 2, `Only ${sandboxesFound} sandbox found — consider dev, QA, and UAT environments for Agentforce`),
-      ac('do_ac_3', 'Recent successful deployments indicate active CI/CD', successfulDeploys.length > 0, 'No recent successful deployments found — CI/CD and deployment processes may not be established')
+      ac('do_ac_3', 'Recent successful deployments indicate active CI/CD', successfulDeploys.length > 0, 'No recent successful deployments found — CI/CD and deployment processes may not be established'),
+      ac('do_ac_4', 'At least 3 sandboxes exist (Dev, QA, UAT environment strategy)', sandboxesFound >= 3, `Only ${sandboxesFound} sandbox(es) found — a proper Agentforce environment strategy requires at minimum Dev, QA, and UAT sandboxes`),
+      ac('do_ac_5', 'Agentforce-related static resources or assets are present', hasAgentforceStaticResources, 'No Agentforce-related static resources found — confirm deployment assets and metadata are source-controlled')
     ];
 
     res.json({
@@ -919,6 +1042,212 @@ app.get('/api/assess/compliance', requireAuth, async (req, res) => {
         { id: 'comp_2', text: 'Are prompts, responses, actions, and transcripts auditable?', type: 'boolean' },
         { id: 'comp_3', text: 'Are retention and deletion requirements defined for Messaging Sessions, transcripts, and AI outputs?', type: 'boolean' },
         { id: 'comp_4', text: 'Is data access restricted to authorized individuals for intended purposes?', type: 'boolean' }
+      ]
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Category 21: Agent Design and Use Case Readiness ────────────────────────
+app.get('/api/assess/agent-design', requireAuth, async (req, res) => {
+  try {
+    const conn = getConn(req);
+    const [agents, topics, agentFunctions, promptTemplates] = await Promise.all([
+      safeQuery(conn, 'SELECT Id, DeveloperName, Status, Description FROM BotDefinition LIMIT 30').catch(() => ({ records: [] })),
+      safeQuery(conn, 'SELECT Id, DeveloperName, MasterLabel, Description FROM GenAiPlugin WHERE IsActive = true LIMIT 50').catch(() => ({ records: [] })),
+      safeQuery(conn, 'SELECT Id, DeveloperName, Description FROM GenAiFunction WHERE IsActive = true LIMIT 50').catch(() => ({ records: [] })),
+      safeQuery(conn, 'SELECT Id, DeveloperName, Type, Status FROM PromptTemplate LIMIT 30').catch(() => ({ records: [] }))
+    ]);
+
+    const agentsWithDescription = (agents.records || []).filter(a => a.Description && a.Description.length > 10).length;
+    const topicsWithDescription = (topics.records || []).filter(t => t.Description && t.Description.length > 10).length;
+    const actionsWithDescription = (agentFunctions.records || []).filter(f => f.Description && f.Description.length > 10).length;
+    const activeAgents = (agents.records || []).filter(a => a.Status === 'Active').length;
+    const totalAgents = (agents.records || []).length;
+    const totalTopics = (topics.records || []).length;
+    const totalActions = (agentFunctions.records || []).length;
+    const activePromptTemplates = (promptTemplates.records || []).filter(p => p.Status === 'Active').length;
+
+    const autoChecks = [
+      ac('ad_ac_1', 'Agents are defined in Agentforce Builder', totalAgents > 0, 'No agents defined — agent build has not started'),
+      ac('ad_ac_2', 'At least one agent is Active', activeAgents > 0, 'No agents are Active — all agents are in Draft and cannot serve users'),
+      ac('ad_ac_3', 'Agents have descriptions (use case is documented)', agentsWithDescription > 0, 'No agents have descriptions — document the job-to-be-done for each agent'),
+      ac('ad_ac_4', 'Topics/subagents are defined and have descriptions', topicsWithDescription > 0, totalTopics === 0 ? 'No topics defined — agent scope has not been decomposed into jobs-to-be-done' : 'Topics exist but lack descriptions — document the intent scope of each topic'),
+      ac('ad_ac_5', 'Agent actions are defined and documented', actionsWithDescription > 0, totalActions === 0 ? 'No agent actions defined — agents have no capability to execute tasks' : 'Actions exist but lack descriptions — document each action for agent discoverability'),
+      ac('ad_ac_6', 'Active prompt templates are configured for agent grounding', activePromptTemplates > 0, 'No active prompt templates — agent instructions and grounding prompts are not yet defined')
+    ];
+
+    res.json({
+      category: 'Agent Design and Use Case Readiness',
+      totalAgents,
+      activeAgents,
+      totalTopics,
+      totalActions,
+      activePromptTemplates,
+      agentsWithDescription,
+      topicsWithDescription,
+      actionsWithDescription,
+      autoChecks,
+      questions: [
+        { id: 'ad_1', text: 'Is the agent persona, job-to-be-done, and success metrics (containment rate, CSAT, handle time) defined?', type: 'boolean' },
+        { id: 'ad_2', text: 'Are the top 10–20 intents/utterances documented and validated with business stakeholders?', type: 'boolean' },
+        { id: 'ad_3', text: 'Is the human-in-the-loop escalation model and override process confirmed?', type: 'boolean' },
+        { id: 'ad_4', text: 'Is a phased rollout plan defined (pilot group → GA) with go/no-go criteria?', type: 'boolean' },
+        { id: 'ad_5', text: 'Has a design authority or review process been established for agent topics, actions, and prompts?', type: 'boolean' },
+        { id: 'ad_6', text: 'Are out-of-scope topics and explicit agent guardrails documented?', type: 'boolean' }
+      ]
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Category 22: Prompt Engineering and Grounding Strategy ──────────────────
+app.get('/api/assess/prompt-engineering', requireAuth, async (req, res) => {
+  try {
+    const conn = getConn(req);
+    const [promptTemplates, dataLibraries, agents] = await Promise.all([
+      safeQuery(conn, 'SELECT Id, DeveloperName, Type, Status, Description FROM PromptTemplate LIMIT 50').catch(() => ({ records: [] })),
+      safeQuery(conn, 'SELECT Id, DeveloperName, Type FROM AgentforceDataLibrary LIMIT 20').catch(() => ({ records: [] })),
+      safeQuery(conn, 'SELECT Id, DeveloperName, Status FROM BotDefinition LIMIT 20').catch(() => ({ records: [] }))
+    ]);
+
+    const totalTemplates = (promptTemplates.records || []).length;
+    const activeTemplates = (promptTemplates.records || []).filter(p => p.Status === 'Active').length;
+    const draftTemplates = (promptTemplates.records || []).filter(p => p.Status === 'Draft').length;
+    const templatesWithDescription = (promptTemplates.records || []).filter(p => p.Description && p.Description.length > 10).length;
+    const templateTypes = [...new Set((promptTemplates.records || []).map(p => p.Type))];
+    const hasFlexTemplate = (promptTemplates.records || []).some(p => p.Type === 'Flex');
+    const dataLibrariesCount = (dataLibraries.records || []).length;
+    const agentsCount = (agents.records || []).length;
+
+    const autoChecks = [
+      ac('pe_ac_1', 'Prompt templates are defined', totalTemplates > 0, 'No prompt templates found — agent instructions, grounding prompts, and action prompts are not configured'),
+      ac('pe_ac_2', 'Active prompt templates exist (not all in Draft)', activeTemplates > 0, draftTemplates > 0 ? `${draftTemplates} prompt template(s) are in Draft — activate reviewed templates before go-live` : 'No active prompt templates — publish reviewed templates'),
+      ac('pe_ac_3', 'Flex-type prompt templates are configured', hasFlexTemplate, 'No Flex prompt templates found — Flex templates provide the most flexible agent instruction patterns for Agentforce'),
+      ac('pe_ac_4', 'Prompt templates have descriptions (versioning and purpose documented)', templatesWithDescription > 0, 'No prompt templates have descriptions — document the purpose, version, and grounding source of each template'),
+      ac('pe_ac_5', 'Grounding data sources (Data Libraries) are linked', dataLibrariesCount > 0, 'No Agentforce Data Libraries configured — prompts cannot ground on unstructured data sources'),
+      ac('pe_ac_6', 'Prompt templates exist relative to agents defined', agentsCount === 0 || activeTemplates >= agentsCount, agentsCount > activeTemplates ? `${agentsCount} agent(s) defined but only ${activeTemplates} active prompt template(s) — each agent should have at least one active template` : 'No agents defined yet')
+    ];
+
+    res.json({
+      category: 'Prompt Engineering and Grounding Strategy',
+      totalTemplates,
+      activeTemplates,
+      draftTemplates,
+      templatesWithDescription,
+      templateTypes,
+      dataLibrariesCount,
+      autoChecks,
+      questions: [
+        { id: 'pe_1', text: 'Are system prompts scoped to the specific job-to-be-done (not generic instructions)?', type: 'boolean' },
+        { id: 'pe_2', text: 'Are grounding sources (Knowledge, Data Library, Flow output, CRM data) explicitly referenced in each prompt?', type: 'boolean' },
+        { id: 'pe_3', text: 'Is a prompt versioning and peer review process defined before templates go active?', type: 'boolean' },
+        { id: 'pe_4', text: 'Are prompts tested for hallucination, tone, compliance, and escalation trigger accuracy?', type: 'boolean' },
+        { id: 'pe_5', text: 'Is the LLM model selection confirmed (Salesforce-managed vs. BYOLLM via Model Builder)?', type: 'boolean' },
+        { id: 'pe_6', text: 'Are prohibitions and guardrails explicitly stated in system prompts (topics the agent must not handle)?', type: 'boolean' }
+      ]
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Category 23: Escalation and Handoff Architecture ────────────────────────
+app.get('/api/assess/escalation', requireAuth, async (req, res) => {
+  try {
+    const conn = getConn(req);
+    const [transferFlows, queues, serviceChannels, omniFlows] = await Promise.all([
+      safeQuery(conn, "SELECT Id, DeveloperName, ProcessType, Status FROM Flow WHERE Status = 'Active' AND (DeveloperName LIKE '%Transfer%' OR DeveloperName LIKE '%Escalat%' OR DeveloperName LIKE '%Handoff%' OR DeveloperName LIKE '%Handover%') LIMIT 20").catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT Id, Name FROM Group WHERE Type = 'Queue' LIMIT 50").catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT Id, DeveloperName, IsActive FROM ServiceChannel LIMIT 30").catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT Id, DeveloperName, ProcessType, Status FROM Flow WHERE Status = 'Active' AND ProcessType = 'OmniChannelFlow' LIMIT 20").catch(() => ({ records: [] }))
+    ]);
+
+    const transferFlowsCount = (transferFlows.records || []).length;
+    const queuesCount = (queues.records || []).length;
+    const activeServiceChannels = (serviceChannels.records || []).filter(s => s.IsActive).length;
+    const omniFlowsCount = (omniFlows.records || []).length;
+
+    const autoChecks = [
+      ac('esc_ac_1', 'Escalation/transfer flows are defined', transferFlowsCount > 0, 'No active flows with transfer/escalation/handoff naming found — agent-to-human escalation paths are not configured'),
+      ac('esc_ac_2', 'Queues exist for escalated work routing', queuesCount > 0, 'No queues found — escalated conversations have nowhere to route when the agent cannot handle a request'),
+      ac('esc_ac_3', 'Active service channels are configured for handoff', activeServiceChannels > 0, 'No active service channels — Omni-Channel handoff from Agentforce to human agents is not possible'),
+      ac('esc_ac_4', 'Omni-Channel flows are configured for routing logic', omniFlowsCount > 0, 'No OmniChannelFlow type flows found — Omni-Channel routing flows are required for Agentforce handoff to human queues'),
+      ac('esc_ac_5', 'Multiple queues support tiered escalation', queuesCount >= 2, `Only ${queuesCount} queue(s) found — consider tiered queues (Tier 1, Tier 2, Supervisor) for escalation routing`),
+      ac('esc_ac_6', 'Service channels cover messaging and/or chat', activeServiceChannels >= 2, `Only ${activeServiceChannels} active service channel(s) — ensure channels cover all deployment targets for escalation`)
+    ];
+
+    res.json({
+      category: 'Escalation and Handoff Architecture',
+      transferFlowsCount,
+      transferFlows: transferFlows.records || [],
+      queuesCount,
+      activeServiceChannels,
+      omniFlowsCount,
+      autoChecks,
+      questions: [
+        { id: 'esc_1', text: 'Is full conversation context (transcript, intent, customer identity, case data) passed to the human agent on escalation?', type: 'boolean' },
+        { id: 'esc_2', text: 'Are escalation triggers defined (sentiment, keywords, topic out of scope, action failure, customer request)?', type: 'boolean' },
+        { id: 'esc_3', text: 'Are SLA timers handled correctly on escalation (reset, carried over, or new SLA applied)?', type: 'boolean' },
+        { id: 'esc_4', text: 'Is a supervisor override/intervention path defined for live agent monitoring?', type: 'boolean' },
+        { id: 'esc_5', text: 'Is a fallback path defined for all failure modes (no humans available, action error, channel outage)?', type: 'boolean' },
+        { id: 'esc_6', text: 'Is post-escalation feedback loop established to improve agent accuracy over time?', type: 'boolean' }
+      ]
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Category 24: MuleSoft, Middleware, and External API Readiness ────────────
+app.get('/api/assess/middleware', requireAuth, async (req, res) => {
+  try {
+    const conn = getConn(req);
+    const [namedCredentials, externalCredentials, externalServices, remoteSites, apexCallouts] = await Promise.all([
+      safeQuery(conn, 'SELECT Id, DeveloperName, Endpoint FROM NamedCredential LIMIT 50').catch(() => ({ records: [] })),
+      safeQuery(conn, 'SELECT Id, DeveloperName, AuthenticationProtocol FROM ExternalCredential LIMIT 30').catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT Id, DeveloperName, Status, Description FROM ExternalServiceRegistration WHERE Status = 'Complete' LIMIT 30").catch(() => ({ records: [] })),
+      safeQuery(conn, 'SELECT Id, EndpointUrl, IsActive, MutualAuthEnabled FROM RemoteProxy WHERE IsActive = true LIMIT 50').catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT Id, Name FROM ApexClass WHERE Status = 'Active' AND Name LIKE '%Callout%' LIMIT 20").catch(() => ({ records: [] }))
+    ]);
+
+    const namedCredentialsCount = (namedCredentials.records || []).length;
+    const externalCredentialsCount = (externalCredentials.records || []).length;
+    const externalServicesCount = (externalServices.records || []).length;
+    const activeRemoteSitesCount = (remoteSites.records || []).length;
+    const insecureRemoteSites = (remoteSites.records || []).filter(r => r.EndpointUrl && !r.EndpointUrl.startsWith('https')).length;
+    const externalServicesWithDescription = (externalServices.records || []).filter(s => s.Description && s.Description.length > 5).length;
+    const oauthExternalCredentials = (externalCredentials.records || []).filter(c => c.AuthenticationProtocol && c.AuthenticationProtocol.includes('OAuth')).length;
+
+    const autoChecks = [
+      ac('mw_ac_1', 'Named Credentials are used for external integrations', namedCredentialsCount > 0, 'No Named Credentials found — agent external actions may be using hardcoded endpoints or credentials, which is a security risk'),
+      ac('mw_ac_2', 'External Credentials are configured for OAuth-based auth', externalCredentialsCount > 0, 'No External Credentials found — modern per-user OAuth authentication for agent external actions is not configured'),
+      ac('mw_ac_3', 'External Service Registrations exist for OpenAPI-based connections', externalServicesCount > 0, 'No completed External Service Registrations found — OpenAPI/REST-based external system connections for agent actions are not set up'),
+      ac('mw_ac_4', 'All active remote sites use HTTPS', insecureRemoteSites === 0, `${insecureRemoteSites} active remote site(s) use HTTP — all agent external callout endpoints must use HTTPS`),
+      ac('mw_ac_5', 'External Services are documented (have descriptions)', externalServicesCount === 0 || externalServicesWithDescription > 0, 'External Service Registrations exist but lack descriptions — document the purpose, owner, and rate limits of each external connection'),
+      ac('mw_ac_6', 'OAuth-based External Credentials are configured', oauthExternalCredentials > 0, externalCredentialsCount === 0 ? 'No External Credentials found' : 'No OAuth-based External Credentials found — prefer OAuth over basic auth for agent action external calls')
+    ];
+
+    res.json({
+      category: 'MuleSoft, Middleware, and External API Readiness',
+      namedCredentialsCount,
+      externalCredentialsCount,
+      externalServicesCount,
+      activeRemoteSitesCount,
+      insecureRemoteSites,
+      oauthExternalCredentials,
+      namedCredentials: (namedCredentials.records || []).slice(0, 10),
+      externalServices: externalServices.records || [],
+      autoChecks,
+      questions: [
+        { id: 'mw_1', text: 'Are all external systems the agent must query or update identified with confirmed API contracts?', type: 'boolean' },
+        { id: 'mw_2', text: 'Are API rate limits, retry strategies, and timeout handling defined for each external system?', type: 'boolean' },
+        { id: 'mw_3', text: 'Is the integration pattern confirmed (direct Named Credential callout, External Service, Flow, MuleSoft, or middleware)?', type: 'boolean' },
+        { id: 'mw_4', text: 'Is idempotency and auditability defined for all agent-triggered external write operations?', type: 'boolean' },
+        { id: 'mw_5', text: 'Are API version locks in place to prevent breaking changes from impacting live agents?', type: 'boolean' },
+        { id: 'mw_6', text: 'Is MuleSoft Anypoint (if applicable) connected, authenticated, and API catalog aligned with agent action requirements?', type: 'boolean' }
       ]
     });
   } catch (err) {
