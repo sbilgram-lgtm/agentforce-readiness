@@ -35,7 +35,7 @@ export interface AssessmentReport {
   summary: string;
 }
 
-// Category IDs for all 24 areas
+// Category IDs for all 28 areas
 export const CATEGORY_IDS = [
   'licensing',
   'security-model',
@@ -60,7 +60,11 @@ export const CATEGORY_IDS = [
   'agent-design',
   'prompt-engineering',
   'escalation',
-  'middleware'
+  'middleware',
+  'voice',
+  'mcp',
+  'agent-script',
+  'finops'
 ] as const;
 
 export type CategoryId = typeof CATEGORY_IDS[number];
@@ -89,5 +93,9 @@ export const CATEGORY_LABELS: Record<CategoryId, string> = {
   'agent-design': 'Agent Design & Use Case Readiness',
   'prompt-engineering': 'Prompt Engineering & Grounding',
   'escalation': 'Escalation & Handoff Architecture',
-  'middleware': 'Middleware & External API Readiness'
+  'middleware': 'Middleware & External API Readiness',
+  'voice': 'Agentforce Voice Readiness',
+  'mcp': 'MCP & External Tool Integration',
+  'agent-script': 'Agent Script & Metadata',
+  'finops': 'Licensing Model & FinOps'
 };

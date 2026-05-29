@@ -161,12 +161,17 @@ app.get('/api/assess/licensing', requireAuth, async (req, res) => {
     const settings = {};
     (orgSettingsRes.records || []).forEach(r => { settings[r.SettingName] = r.SettingValue; });
     const einsteinEnabled = settings['EinsteinGptEnabled'] === 'true' || settings['EinsteinGenerativeAIEnabled'] === 'true';
-    const [licPSA, licEinsteinQuota] = await Promise.all([
+    const [licPSA, licEinsteinQuota, pricingRes] = await Promise.all([
       safeQuery(conn, "SELECT COUNT() FROM PermissionSetAssignment WHERE PermissionSet.Name LIKE '%Agentforce%' AND Assignee.IsActive = true").catch(() => ({ totalSize: 0 })),
-      safeRest(conn, '/services/data/v62.0/limits/').catch(() => ({}))
+      safeRest(conn, '/services/data/v62.0/limits/').catch(() => ({})),
+      safeQuery(conn, "SELECT SettingName, SettingValue FROM OrganizationSetting WHERE SettingName IN ('FlexCreditsEnabled','ConversationPricingEnabled','AgentforcePricingModel') LIMIT 5").catch(() => ({ records: [] }))
     ]);
     const agentforcePSACount = licPSA.totalSize || 0;
     const einsteinQuotaLimit = (licEinsteinQuota && licEinsteinQuota.DailyEinsteinRequests) ? licEinsteinQuota.DailyEinsteinRequests : null;
+
+    const pricingSettings = {};
+    (pricingRes.records || []).forEach(r => { pricingSettings[r.SettingName] = r.SettingValue; });
+    const hasPricingModel = Object.keys(pricingSettings).length > 0 || (licEinsteinQuota && licEinsteinQuota.DailyEinsteinRequests && licEinsteinQuota.DailyEinsteinRequests.Max > 0);
 
     const autoChecks = [
       ac('lic_ac_1', 'Einstein Generative AI is enabled', einsteinEnabled, 'Einstein Generative AI is not enabled in org settings'),
@@ -174,7 +179,8 @@ app.get('/api/assess/licensing', requireAuth, async (req, res) => {
       ac('lic_ac_3', 'Data Cloud is enabled', settings['DataCloudEnabled'] === 'true', 'Data Cloud is not enabled in org settings'),
       ac('lic_ac_4', 'A permission set with Manage AI Agents exists', (manageAIAgentsPS.records || []).length > 0, 'No permission set found with Manage AI Agents — admin cannot manage agents'),
       ac('lic_ac_5', 'Active users have Agentforce permission set assigned', agentforcePSACount > 0, 'No active users assigned an Agentforce permission set — licensing may not be activated for any user'),
-      ac('lic_ac_6', 'Einstein/Agentforce AI request quota is provisioned', !!(einsteinQuotaLimit && einsteinQuotaLimit.Max > 0), 'DailyEinsteinRequests limit not found — Agentforce AI quota may not be provisioned for this org')
+      ac('lic_ac_6', 'Einstein/Agentforce AI request quota is provisioned', !!(einsteinQuotaLimit && einsteinQuotaLimit.Max > 0), 'DailyEinsteinRequests limit not found — Agentforce AI quota may not be provisioned for this org'),
+      ac('lic_ac_7', 'Agentforce pricing model is confirmed (Flex Credits or Conversations)', hasPricingModel, 'No Agentforce pricing model setting detected — confirm Flex Credits vs. Conversations pricing model selection before go-live (they cannot coexist in the same org)')
     ];
 
     res.json({
@@ -262,10 +268,13 @@ app.get('/api/assess/agent-user', requireAuth, async (req, res) => {
 
     const intUsers = (integrationUsers.records || []).filter(u => u.UserType !== 'Standard');
 
-    const [modifyAllPS, autoProcUsers, runFlowPS] = await Promise.all([
+    const [modifyAllPS, autoProcUsers, runFlowPS, apexToolPS, viewTracesPS, deployAgentsPS] = await Promise.all([
       safeQuery(conn, "SELECT Id, Name FROM PermissionSet WHERE PermissionsModifyAllData = true AND IsCustom = true LIMIT 10").catch(() => ({ records: [] })),
       safeQuery(conn, "SELECT COUNT() FROM User WHERE UserType = 'AutoProc' AND IsActive = true").catch(() => ({ totalSize: 0 })),
-      safeQuery(conn, "SELECT COUNT() FROM PermissionSet WHERE PermissionsRunFlow = true AND IsCustom = true LIMIT 1").catch(() => ({ totalSize: 0 }))
+      safeQuery(conn, "SELECT COUNT() FROM PermissionSet WHERE PermissionsRunFlow = true AND IsCustom = true LIMIT 1").catch(() => ({ totalSize: 0 })),
+      safeQuery(conn, "SELECT COUNT() FROM PermissionSet WHERE PermissionsUseApexAsAgentTool = true LIMIT 1").catch(() => ({ totalSize: 0 })),
+      safeQuery(conn, "SELECT COUNT() FROM PermissionSet WHERE PermissionsViewAgentTraces = true LIMIT 1").catch(() => ({ totalSize: 0 })),
+      safeQuery(conn, "SELECT COUNT() FROM PermissionSet WHERE PermissionsDeployAgents = true LIMIT 1").catch(() => ({ totalSize: 0 }))
     ]);
     const noModifyAll = (modifyAllPS.records || []).length === 0;
     const hasAutoProcUser = (autoProcUsers.totalSize || 0) > 0;
@@ -276,7 +285,10 @@ app.get('/api/assess/agent-user', requireAuth, async (req, res) => {
       ac('au_ac_2', 'No custom permission sets grant Modify All Data', noModifyAll, `${(modifyAllPS.records||[]).length} custom permission set(s) grant Modify All Data — verify the agent user does not inherit these`),
       ac('au_ac_3', 'Permission Set Groups are defined', (permSetGroups.records||[]).length > 0, 'No Permission Set Groups found — use PSGs to manage least-privilege permission bundles for agent users'),
       ac('au_ac_4', 'Agentforce Bot User (AutoProc) exists', hasAutoProcUser, 'No AutoProc user type found — a dedicated Agentforce bot user has not been provisioned'),
-      ac('au_ac_5', 'A permission set grants Run Flows (required for agent actions)', hasRunFlowPS, 'No custom permission set grants Run Flows — agent actions using flows will fail without this permission')
+      ac('au_ac_5', 'A permission set grants Run Flows (required for agent actions)', hasRunFlowPS, 'No custom permission set grants Run Flows — agent actions using flows will fail without this permission'),
+      ac('au_ac_6', 'UseApexAsAgentTool permission set exists (MCP/Apex-as-tool)', apexToolPS.totalSize > 0, 'No permission set grants UseApexAsAgentTool — required for exposing Apex methods as MCP tools for agents (Spring \'26)'),
+      ac('au_ac_7', 'ViewAgentTraces permission set exists (platform tracing)', viewTracesPS.totalSize > 0, 'No permission set grants ViewAgentTraces — required for Agent Platform Tracing observability (Spring \'26)'),
+      ac('au_ac_8', 'DeployAgents permission set exists (production deployment)', deployAgentsPS.totalSize > 0, 'No permission set grants DeployAgents — required for deploying agents to production (Spring \'26)')
     ];
 
     res.json({
@@ -409,9 +421,10 @@ app.get('/api/assess/knowledge', requireAuth, async (req, res) => {
     const publishedArticles = articles.totalSize || 0;
     const archivedArticles2 = archivedArticles.totalSize || 0;
     const articleTypesCount = knowledgeEnabled.totalSize !== undefined ? 1 : 0;
-    const [staleArticles, dataCategories] = await Promise.all([
+    const [staleArticles, dataCategories, groundingRes] = await Promise.all([
       safeQuery(conn, "SELECT COUNT() FROM KnowledgeArticleVersion WHERE PublishStatus = 'Online' AND LastModifiedDate < LAST_N_YEARS:2 LIMIT 1").catch(() => ({ totalSize: 0 })),
-      safeQuery(conn, "SELECT COUNT() FROM DataCategory LIMIT 1").catch(() => ({ totalSize: 0 }))
+      safeQuery(conn, "SELECT COUNT() FROM DataCategory LIMIT 1").catch(() => ({ totalSize: 0 })),
+      safeRest(conn, "/services/data/v62.0/tooling/query/?q=SELECT+Id,DeveloperName+FROM+KnowledgeArticleGrounding+LIMIT+5").catch(() => ({ records: [] }))
     ]);
     const noStaleArticles = (staleArticles.totalSize || 0) === 0;
     const hasDataCategories = (dataCategories.totalSize || 0) > 0;
@@ -421,7 +434,8 @@ app.get('/api/assess/knowledge', requireAuth, async (req, res) => {
       ac('km_ac_2', 'Published Knowledge articles exist', publishedArticles > 0, 'No published Knowledge articles — agent has no content to ground on'),
       ac('km_ac_3', 'Archive ratio is healthy (published >= archived)', publishedArticles >= archivedArticles2, `Archived articles (${archivedArticles2}) exceed published (${publishedArticles}) — article lifecycle governance may be needed`),
       ac('km_ac_4', 'Knowledge articles are current (no articles >2 years old)', noStaleArticles, 'Published Knowledge articles are more than 2 years old — stale content degrades agent grounding quality'),
-      ac('km_ac_5', 'Knowledge data categories are configured', hasDataCategories, 'No Knowledge data categories found — agents use data categories for topic scoping and article retrieval')
+      ac('km_ac_5', 'Knowledge data categories are configured', hasDataCategories, 'No Knowledge data categories found — agents use data categories for topic scoping and article retrieval'),
+      ac('km_ac_6', 'Knowledge Article Grounding is configured (Spring \'26)', (groundingRes.records || []).length > 0, 'No KnowledgeArticleGrounding records found — Knowledge grounding for Agentforce requires explicit grounding configuration in Spring \'26+')
     ];
 
     res.json({
@@ -504,9 +518,11 @@ app.get('/api/assess/channels', requireAuth, async (req, res) => {
 
     const embeddedDeploymentsCount = (embeddedServiceDeployments.records || []).length;
     const activeMessagingCount = (messagingChannels.records || []).filter(c => c.IsActive).length;
-    const [embeddedServiceConfigs, activeChatMessagingChannels] = await Promise.all([
+    const [embeddedServiceConfigs, activeChatMessagingChannels, voiceChannelRes, whatsAppRes] = await Promise.all([
       safeQuery(conn, "SELECT COUNT() FROM EmbeddedServiceConfig LIMIT 1").catch(() => ({ totalSize: 0 })),
-      safeQuery(conn, "SELECT COUNT() FROM MessagingChannel WHERE IsActive = true AND (Type = 'EmbeddedMessaging' OR Type = 'WebChat') LIMIT 1").catch(() => ({ totalSize: 0 }))
+      safeQuery(conn, "SELECT COUNT() FROM MessagingChannel WHERE IsActive = true AND (Type = 'EmbeddedMessaging' OR Type = 'WebChat') LIMIT 1").catch(() => ({ totalSize: 0 })),
+      safeQuery(conn, "SELECT COUNT() FROM ServiceChannel WHERE RelatedEntityType = 'VoiceCall' LIMIT 1").catch(() => ({ totalSize: 0 })),
+      safeQuery(conn, "SELECT COUNT() FROM MessagingChannel WHERE Type = 'WhatsApp' AND IsActive = true LIMIT 1").catch(() => ({ totalSize: 0 }))
     ]);
     const hasEmbeddedServiceConfig = (embeddedServiceConfigs.totalSize || 0) > 0;
     const hasActiveChatChannel = (activeChatMessagingChannels.totalSize || 0) > 0;
@@ -516,7 +532,9 @@ app.get('/api/assess/channels', requireAuth, async (req, res) => {
       ac('ch_ac_2', 'Active messaging channels exist', activeMessagingCount > 0, `${(messagingChannels.records||[]).length} messaging channel(s) found but none are active`),
       ac('ch_ac_3', 'Embedded service deployments exist', embeddedDeploymentsCount > 0, 'No embedded service deployments — web chat/Enhanced Chat channel deployment is not configured'),
       ac('ch_ac_4', 'Embedded Service configuration exists', hasEmbeddedServiceConfig, 'No Embedded Service configuration found — web chat deployment for Agentforce requires an Embedded Service config'),
-      ac('ch_ac_5', 'Enhanced Messaging or Web Chat channel is active', hasActiveChatChannel, 'No active Enhanced Messaging or Web Chat channel — Agentforce Service Agent requires one of these channel types')
+      ac('ch_ac_5', 'Enhanced Messaging or Web Chat channel is active', hasActiveChatChannel, 'No active Enhanced Messaging or Web Chat channel — Agentforce Service Agent requires one of these channel types'),
+      ac('ch_ac_6', 'Voice service channel is configured (Agentforce Voice)', voiceChannelRes.totalSize > 0, 'No Voice service channel found — Agentforce Voice (GA Spring \'26) requires a voice-type service channel (note: voice actions cost 30 Flex Credits vs 20 for standard)'),
+      ac('ch_ac_7', 'WhatsApp channel is configured', whatsAppRes.totalSize > 0, 'No active WhatsApp messaging channel — WhatsApp Voice support added in Spring \'26 for contact center deployments')
     ];
 
     res.json({
@@ -638,9 +656,11 @@ app.get('/api/assess/automation', requireAuth, async (req, res) => {
     const promptTemplatesCount = (promptTemplates.records || []).length;
     const invalidApexCount = (apexClasses.records || []).filter(c => !c.IsValid).length;
     const agentFunctionsCount = (agentFunctions.records || []).length;
-    const [flowsWithDescriptions, invocableApexClasses] = await Promise.all([
+    const [flowsWithDescriptions, invocableApexClasses, agentScriptRes, mcpToolsRes] = await Promise.all([
       safeQuery(conn, "SELECT COUNT() FROM Flow WHERE ProcessType = 'AutoLaunchedFlow' AND Status = 'Active' AND Description != null LIMIT 1").catch(() => ({ totalSize: 0 })),
-      safeQuery(conn, "SELECT COUNT() FROM ApexClass WHERE Status = 'Active' AND Name LIKE '%Invocable%' LIMIT 1").catch(() => ({ totalSize: 0 }))
+      safeQuery(conn, "SELECT COUNT() FROM ApexClass WHERE Status = 'Active' AND Name LIKE '%Invocable%' LIMIT 1").catch(() => ({ totalSize: 0 })),
+      safeRest(conn, "/services/data/v62.0/tooling/query/?q=SELECT+Id,DeveloperName+FROM+AgentScript+LIMIT+10").catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT COUNT() FROM ExternalServiceRegistration WHERE Status = 'Complete' AND DeveloperName LIKE '%MCP%' LIMIT 1").catch(() => ({ totalSize: 0 }))
     ]);
     const hasFlowsWithDescriptions = (flowsWithDescriptions.totalSize || 0) > 0;
     const hasInvocableApex = (invocableApexClasses.totalSize || 0) > 0;
@@ -652,7 +672,9 @@ app.get('/api/assess/automation', requireAuth, async (req, res) => {
       ac('auto_ac_4', 'No invalid Apex classes', invalidApexCount === 0, `${invalidApexCount} Apex class(es) have compilation errors — fix before using as agent actions`),
       ac('auto_ac_5', 'Agent actions (GenAiFunction) are configured', agentFunctionsCount > 0, 'No active GenAiFunction records found — no actions have been configured in Agentforce Builder yet'),
       ac('auto_ac_6', 'Active flows have descriptions (agent action discoverability)', hasFlowsWithDescriptions, 'Active AutoLaunchedFlows lack descriptions — agents cannot discover undocumented flows as candidate actions'),
-      ac('auto_ac_7', 'Invocable Apex methods exist for agent actions', hasInvocableApex, 'No Apex classes with \'Invocable\' in the name found — confirm @InvocableMethod annotations exist for agent action candidates')
+      ac('auto_ac_7', 'Invocable Apex methods exist for agent actions', hasInvocableApex, 'No Apex classes with \'Invocable\' in the name found — confirm @InvocableMethod annotations exist for agent action candidates'),
+      ac('auto_ac_8', 'Agent Scripts are defined (Spring \'26 DSL)', (agentScriptRes.records || []).length > 0, 'No AgentScript records found — Agent Script is the new Spring \'26 DSL that combines natural language with deterministic logic for more reliable agents'),
+      ac('auto_ac_9', 'MCP Tool registrations exist (Spring \'26)', mcpToolsRes.totalSize > 0, 'No MCP Tool registrations found — Model Context Protocol tools (Spring \'26 GA) enable agents to interact with external AI systems and expose Apex as tools')
     ];
 
     res.json({
@@ -693,12 +715,16 @@ app.get('/api/assess/agentforce-builder', requireAuth, async (req, res) => {
     const activeGenAiFunctions = await safeQuery(conn, "SELECT COUNT() FROM GenAiFunction WHERE IsActive = true LIMIT 1").catch(() => ({ totalSize: 0 }));
     const hasActiveGenAiFunctions = (activeGenAiFunctions.totalSize || 0) > 0;
 
+    const agentScriptCountRes = await safeRest(conn, "/services/data/v62.0/tooling/query/?q=SELECT+COUNT()+FROM+AgentScript+LIMIT+1").catch(() => ({ records: [] }));
+    const agentScriptCount = (agentScriptCountRes.records || [])[0]?.expr0 || 0;
+
     const autoChecks = [
       ac('ab_ac_1', 'Agentforce agents (Bot Definitions) are defined', agentsFound > 0, 'No Agentforce agents found — agent build has not started'),
-      ac('ab_ac_2', 'Agent subagents/topics (GenAiPlugin) are defined', topicsFound > 0, 'No active GenAiPlugin records found — agents have no defined subagents or topics'),
-      ac('ab_ac_3', 'Topics-to-agents ratio suggests decomposition (>=1 topic per agent)', agentsFound > 0 && topicsFound >= agentsFound, agentsFound === 0 ? 'No agents found' : `${agentsFound} agent(s) but ${topicsFound} subagent(s) — ensure each agent has at least one topic scoped to a job-to-be-done`),
+      ac('ab_ac_2', 'Agent subagents (GenAiPlugin) are defined — Topics renamed to Subagents in Spring \'26', topicsFound > 0, 'No active GenAiPlugin records found — agents have no defined Subagents (formerly Topics)'),
+      ac('ab_ac_3', 'Topics-to-agents ratio suggests decomposition (>=1 topic per agent)', agentsFound > 0 && topicsFound >= agentsFound, agentsFound === 0 ? 'No agents found' : `${agentsFound} agent(s) but ${topicsFound} subagent(s) — ensure each agent has at least one Subagent scoped to a job-to-be-done`),
       ac('ab_ac_4', 'At least one agent is Active (not just Draft)', activeAgentsInBuilder > 0, 'No agents are in Active status — all defined agents are in Draft and cannot be deployed'),
-      ac('ab_ac_5', 'Active agent actions (GenAiFunction) are attached to topics', hasActiveGenAiFunctions, 'No active GenAiFunction records — topics have no actions configured and cannot execute tasks')
+      ac('ab_ac_5', 'Active agent actions (GenAiFunction) are attached to topics', hasActiveGenAiFunctions, 'No active GenAiFunction records — Subagents have no actions configured and cannot execute tasks'),
+      ac('ab_ac_6', 'Agent Scripts are used in at least one agent (Spring \'26)', (agentScriptCount || 0) > 0, 'No Agent Scripts found — Spring \'26 Agent Script DSL provides deterministic + LLM hybrid reasoning; plain text instructions are less reliable')
     ];
 
     res.json({
@@ -900,9 +926,11 @@ app.get('/api/assess/observability', requireAuth, async (req, res) => {
     const hasPromptInteractions = (promptInteractions.totalSize || 0) > 0;
     const hasReports = (reportCount.totalSize || 0) > 0;
 
-    const [dashboardCount, messagingSessionCount] = await Promise.all([
+    const [dashboardCount, messagingSessionCount, agentTraceRes, viewTracesPermRes] = await Promise.all([
       safeQuery(conn, "SELECT COUNT() FROM Dashboard LIMIT 1").catch(() => ({ totalSize: 0 })),
-      safeQuery(conn, "SELECT COUNT() FROM MessagingSession LIMIT 1").catch(() => ({ totalSize: 0 }))
+      safeQuery(conn, "SELECT COUNT() FROM MessagingSession LIMIT 1").catch(() => ({ totalSize: 0 })),
+      safeRest(conn, "/services/data/v62.0/tooling/query/?q=SELECT+Id,CreatedDate+FROM+AgentTrace+ORDER+BY+CreatedDate+DESC+LIMIT+5").catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT COUNT() FROM PermissionSet WHERE PermissionsViewAgentTraces = true LIMIT 1").catch(() => ({ totalSize: 0 }))
     ]);
     const hasDashboards = (dashboardCount.totalSize || 0) > 0;
     const hasMessagingSessions = (messagingSessionCount.totalSize || 0) > 0;
@@ -913,7 +941,9 @@ app.get('/api/assess/observability', requireAuth, async (req, res) => {
       ac('obs_ac_3', 'Prompt interaction data is being captured (GenAiPromptInteraction)', hasPromptInteractions, 'No GenAiPromptInteraction records found — prompt-level observability is not yet active (requires live agent usage)'),
       ac('obs_ac_4', 'Reports exist for operational monitoring', hasReports, 'No reports found — operational dashboards for agent performance monitoring have not been built'),
       ac('obs_ac_5', 'Dashboards exist for operational monitoring', hasDashboards, 'No dashboards found — build operational dashboards for agent containment, handoff rate, and action success metrics'),
-      ac('obs_ac_6', 'Messaging session data is being captured', hasMessagingSessions, 'No MessagingSession records found — live conversation capture is not yet active (may require live agent usage)')
+      ac('obs_ac_6', 'Messaging session data is being captured', hasMessagingSessions, 'No MessagingSession records found — live conversation capture is not yet active (may require live agent usage)'),
+      ac('obs_ac_7', 'Agent Platform Traces exist (Spring \'26 tracing)', (agentTraceRes.records || []).length > 0, 'No AgentTrace records found — Agent Platform Tracing (Spring \'26 GA) captures LLM calls, Flow execution, and Apex traces for root cause analysis'),
+      ac('obs_ac_8', 'ViewAgentTraces permission is assigned to operations team', viewTracesPermRes.totalSize > 0, 'No permission set grants ViewAgentTraces — operations team cannot access Agent Platform Traces without this permission')
     ];
 
     res.json({
@@ -948,12 +978,17 @@ app.get('/api/assess/devops', requireAuth, async (req, res) => {
     const agentforceStaticResources = await safeQuery(conn, "SELECT COUNT() FROM StaticResource WHERE Name LIKE '%agentforce%' OR Name LIKE '%Agentforce%' OR Name LIKE '%agent%' LIMIT 1").catch(() => ({ totalSize: 0 }));
     const hasAgentforceStaticResources = (agentforceStaticResources.totalSize || 0) > 0;
 
+    const apiVersionsRes = await safeRest(conn, "/services/data/").catch(() => []);
+    const versions = Array.isArray(apiVersionsRes) ? apiVersionsRes : [];
+    const hasV66 = versions.some(v => v.version === '66.0');
+
     const autoChecks = [
       ac('do_ac_1', 'Sandboxes exist (work is not all done in production)', sandboxesFound > 0, 'No sandboxes found — Agentforce development directly in production is extremely high risk'),
       ac('do_ac_2', 'Multiple sandboxes support a proper environment strategy', sandboxesFound >= 2, `Only ${sandboxesFound} sandbox found — consider dev, QA, and UAT environments for Agentforce`),
       ac('do_ac_3', 'Recent successful deployments indicate active CI/CD', successfulDeploys.length > 0, 'No recent successful deployments found — CI/CD and deployment processes may not be established'),
       ac('do_ac_4', 'At least 3 sandboxes exist (Dev, QA, UAT environment strategy)', sandboxesFound >= 3, `Only ${sandboxesFound} sandbox(es) found — a proper Agentforce environment strategy requires at minimum Dev, QA, and UAT sandboxes`),
-      ac('do_ac_5', 'Agentforce-related static resources or assets are present', hasAgentforceStaticResources, 'No Agentforce-related static resources found — confirm deployment assets and metadata are source-controlled')
+      ac('do_ac_5', 'Agentforce-related static resources or assets are present', hasAgentforceStaticResources, 'No Agentforce-related static resources found — confirm deployment assets and metadata are source-controlled'),
+      ac('do_ac_6', 'API v66.0 is available (Spring \'26 agent metadata bundles)', hasV66, 'API v66.0 not available — Spring \'26 versioned agent metadata bundles and Agent Script require Metadata API v66+')
     ];
 
     res.json({
@@ -1251,6 +1286,231 @@ app.get('/api/assess/middleware', requireAuth, async (req, res) => {
         { id: 'mw_4', text: 'Is idempotency and auditability defined for all agent-triggered external write operations?', type: 'boolean' },
         { id: 'mw_5', text: 'Are API version locks in place to prevent breaking changes from impacting live agents?', type: 'boolean' },
         { id: 'mw_6', text: 'Is MuleSoft Anypoint (if applicable) connected, authenticated, and API catalog aligned with agent action requirements?', type: 'boolean' }
+      ]
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Category 25: Agentforce Voice Readiness ─────────────────────────────────
+app.get('/api/assess/voice', requireAuth, async (req, res) => {
+  try {
+    const conn = getConn(req);
+    const [voiceChannels, voiceAgents, voicePresenceStatuses, whatsAppChannels, routingConfigs] = await Promise.all([
+      safeQuery(conn, "SELECT Id, DeveloperName, IsActive FROM ServiceChannel WHERE RelatedEntityType = 'VoiceCall' LIMIT 10").catch(() => ({ records: [] })),
+      safeRest(conn, "/services/data/v62.0/tooling/query/?q=SELECT+Id,DeveloperName+FROM+BotDefinition+WHERE+Type='Voice'+LIMIT+10").catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT Id, DeveloperName, IsActive FROM ServicePresenceStatus WHERE DeveloperName LIKE '%Voice%' OR DeveloperName LIKE '%Phone%' LIMIT 20").catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT Id, DeveloperName, IsActive, Type FROM MessagingChannel WHERE Type = 'WhatsApp' LIMIT 10").catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT Id, DeveloperName, IsActive FROM RoutingConfig WHERE DeveloperName LIKE '%Voice%' OR DeveloperName LIKE '%Phone%' LIMIT 10").catch(() => ({ records: [] }))
+    ]);
+
+    const voiceChannelCount = (voiceChannels.records || []).length;
+    const activeVoiceChannels = (voiceChannels.records || []).filter(c => c.IsActive).length;
+    const voiceAgentCount = (voiceAgents.records || []).length;
+    const voicePresenceCount = (voicePresenceStatuses.records || []).filter(p => p.IsActive).length;
+    const whatsAppCount = (whatsAppChannels.records || []).filter(c => c.IsActive).length;
+    const voiceRoutingCount = (routingConfigs.records || []).length;
+
+    const autoChecks = [
+      ac('voice_ac_1', 'Voice service channel is configured', voiceChannelCount > 0, 'No voice service channel found — Agentforce Voice (GA Spring \'26) requires a VoiceCall-type service channel configured in Omni-Channel'),
+      ac('voice_ac_2', 'Voice service channel is active', activeVoiceChannels > 0, voiceChannelCount === 0 ? 'No voice channels found' : 'Voice service channel exists but is not active — activate it to enable Agentforce Voice routing'),
+      ac('voice_ac_3', 'Voice-type agent is defined', voiceAgentCount > 0, 'No Voice-type Bot Definition found — a dedicated Voice agent must be configured in Agentforce Builder for voice deployments'),
+      ac('voice_ac_4', 'Voice presence statuses are configured', voicePresenceCount > 0, 'No voice-related presence statuses found — agents and human reps need voice-specific presence statuses for Omni-Channel routing'),
+      ac('voice_ac_5', 'Voice routing configuration exists', voiceRoutingCount > 0, 'No voice routing configurations found — Omni-Channel routing rules for voice calls are not configured'),
+      ac('voice_ac_6', 'WhatsApp Voice channel is configured (if in scope)', whatsAppCount > 0, 'No active WhatsApp channel found — WhatsApp Voice support was added in Spring \'26 for contact center deployments (configure if WhatsApp is a target channel)')
+    ];
+
+    res.json({
+      category: 'Agentforce Voice Readiness',
+      voiceChannelCount,
+      activeVoiceChannels,
+      voiceAgentCount,
+      voicePresenceCount,
+      whatsAppCount,
+      voiceRoutingCount,
+      voiceChannels: voiceChannels.records || [],
+      whatsAppChannels: whatsAppChannels.records || [],
+      autoChecks,
+      questions: [
+        { id: 'voice_1', text: 'Is voice identified as a target channel for Agentforce deployment?', type: 'boolean' },
+        { id: 'voice_2', text: 'Is the brand voice/tone and persona defined for the voice agent?', type: 'boolean' },
+        { id: 'voice_3', text: 'Are voice-specific Flex Credit costs budgeted (30 credits per voice action vs. 20 for standard)?', type: 'boolean' },
+        { id: 'voice_4', text: 'Is the escalation path from voice agent to human agent (warm transfer) designed and tested?', type: 'boolean' },
+        { id: 'voice_5', text: 'Are language and regional requirements confirmed for voice deployment?', type: 'boolean' },
+        { id: 'voice_6', text: 'Are call recording, transcript retention, and compliance requirements defined for voice interactions?', type: 'boolean' }
+      ]
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Category 26: MCP & External Tool Integration ────────────────────────────
+app.get('/api/assess/mcp', requireAuth, async (req, res) => {
+  try {
+    const conn = getConn(req);
+    const [namedCredentials, externalCredentials, externalServices, apexWithInvocable] = await Promise.all([
+      safeQuery(conn, "SELECT Id, DeveloperName, Endpoint FROM NamedCredential WHERE DeveloperName LIKE '%MCP%' OR DeveloperName LIKE '%mcp%' LIMIT 20").catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT Id, DeveloperName, AuthenticationProtocol FROM ExternalCredential LIMIT 20").catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT Id, DeveloperName, Status, Description FROM ExternalServiceRegistration WHERE Status = 'Complete' LIMIT 20").catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT COUNT() FROM ApexClass WHERE Status = 'Active' AND Name LIKE '%Tool%' LIMIT 1").catch(() => ({ totalSize: 0 }))
+    ]);
+
+    const mcpNamedCredCount = (namedCredentials.records || []).length;
+    const externalCredCount = (externalCredentials.records || []).length;
+    const externalServicesCount = (externalServices.records || []).length;
+    const apexToolCount = apexWithInvocable.totalSize || 0;
+
+    // Check for UseApexAsAgentTool permission
+    const apexToolPermRes = await safeQuery(conn, "SELECT COUNT() FROM PermissionSet WHERE PermissionsUseApexAsAgentTool = true LIMIT 1").catch(() => ({ totalSize: 0 }));
+    const hasApexToolPerm = (apexToolPermRes.totalSize || 0) > 0;
+
+    // Check for MCP-related tooling metadata
+    const mcpToolRes = await safeRest(conn, "/services/data/v62.0/tooling/query/?q=SELECT+Id,DeveloperName+FROM+ExternalServiceRegistration+WHERE+Status='Complete'+LIMIT+20").catch(() => ({ records: [] }));
+    const mcpToolCount = (mcpToolRes.records || []).length;
+
+    const autoChecks = [
+      ac('mcp_ac_1', 'External Service Registrations exist for MCP/API tool connections', externalServicesCount > 0, 'No completed External Service Registrations — MCP tool connections require OpenAPI/REST service registrations to expose external systems to agents (Spring \'26)'),
+      ac('mcp_ac_2', 'UseApexAsAgentTool permission set exists', hasApexToolPerm, 'No permission set grants UseApexAsAgentTool — this Spring \'26 permission is required to expose Apex methods as MCP tools for agent actions'),
+      ac('mcp_ac_3', 'External Credentials are configured for OAuth-based MCP auth', externalCredCount > 0, 'No External Credentials found — MCP tool integrations should use OAuth-based External Credentials, not basic auth or hardcoded credentials'),
+      ac('mcp_ac_4', 'Apex tool classes exist (candidate MCP tools)', apexToolCount > 0, 'No Apex classes with "Tool" naming found — confirm @InvocableMethod Apex classes are defined and annotated for MCP tool exposure'),
+      ac('mcp_ac_5', 'Named Credentials back external MCP connections', (namedCredentials.records || []).length > 0 || mcpNamedCredCount === 0, (namedCredentials.records || []).length === 0 ? 'No MCP-named credentials found — ensure Named Credentials are used for all MCP external system connections' : null),
+      ac('mcp_ac_6', 'Service registrations are documented', externalServicesCount === 0 || (externalServices.records || []).filter(s => s.Description && s.Description.length > 5).length > 0, 'External Service Registrations exist but lack descriptions — document the purpose, owner, and rate limits of each MCP tool connection')
+    ];
+
+    res.json({
+      category: 'MCP & External Tool Integration',
+      mcpNamedCredCount,
+      externalCredCount,
+      externalServicesCount,
+      apexToolCount,
+      hasApexToolPerm,
+      mcpToolCount,
+      externalServices: externalServices.records || [],
+      autoChecks,
+      questions: [
+        { id: 'mcp_1', text: 'Have external AI tools or systems requiring MCP integration been identified (Claude, Google, etc.)?', type: 'boolean' },
+        { id: 'mcp_2', text: 'Are Apex methods intended as MCP tools annotated with @InvocableMethod and have Apex test coverage?', type: 'boolean' },
+        { id: 'mcp_3', text: 'Are MCP tool connections secured with Named Credentials and OAuth External Credentials?', type: 'boolean' },
+        { id: 'mcp_4', text: 'Are rate limits, retry handling, and timeout behavior defined for each MCP tool connection?', type: 'boolean' },
+        { id: 'mcp_5', text: 'Is the Salesforce MCP Server registry configured for external AI assistant access (if applicable)?', type: 'boolean' },
+        { id: 'mcp_6', text: 'Are MCP tool security policies reviewed — which tools can access what data and perform what actions?', type: 'boolean' }
+      ]
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Category 27: Agent Script & Metadata Readiness ──────────────────────────
+app.get('/api/assess/agent-script', requireAuth, async (req, res) => {
+  try {
+    const conn = getConn(req);
+
+    const [agentScripts, agents, deployRequests, apiVersions] = await Promise.all([
+      safeRest(conn, "/services/data/v62.0/tooling/query/?q=SELECT+Id,DeveloperName,MasterLabel+FROM+AgentScript+LIMIT+30").catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT Id, DeveloperName, Status FROM BotDefinition LIMIT 20").catch(() => ({ records: [] })),
+      safeRest(conn, "/services/data/v62.0/tooling/query/?q=SELECT+Id,Status,StartDate+FROM+DeployRequest+WHERE+Status='Succeeded'+ORDER+BY+StartDate+DESC+LIMIT+10").catch(() => ({ records: [] })),
+      safeRest(conn, "/services/data/").catch(() => ([]))
+    ]);
+
+    const agentScriptCount = (agentScripts.records || []).length;
+    const agentsCount = (agents.records || []).length;
+    const activeAgentsCount = (agents.records || []).filter(a => a.Status === 'Active').length;
+
+    const versions = Array.isArray(apiVersions) ? apiVersions : [];
+    const hasV66 = versions.some(v => v.version === '66.0' || parseFloat(v.version) >= 66);
+    const latestVersion = versions.length > 0 ? Math.max(...versions.map(v => parseFloat(v.version))) : 0;
+
+    const recentDeploys = (deployRequests.records || []).length;
+    const agentScriptRatio = agentsCount > 0 ? agentScriptCount / agentsCount : 0;
+
+    const autoChecks = [
+      ac('as_ac_1', 'Agent Scripts are defined (Spring \'26 DSL)', agentScriptCount > 0, 'No AgentScript records found — Agent Script is the Spring \'26 DSL that combines natural language with deterministic programmatic logic for more reliable, testable agents'),
+      ac('as_ac_2', 'Agent Script coverage relative to agents (>=1 script per agent)', agentsCount === 0 || agentScriptRatio >= 1, agentsCount === 0 ? 'No agents defined yet' : `${agentsCount} agent(s) but only ${agentScriptCount} Agent Script(s) — each agent should use Agent Script instead of plain text instructions`),
+      ac('as_ac_3', 'API v66.0+ is available (Spring \'26 metadata bundles)', hasV66, `Highest available API version is v${latestVersion} — Spring \'26 versioned agent metadata bundles and Agent Script deployment require Metadata API v66+`),
+      ac('as_ac_4', 'Active agents are deployed (not just Draft)', activeAgentsCount > 0, agentsCount === 0 ? 'No agents defined' : 'No agents are in Active status — agents must be activated before they can serve users'),
+      ac('as_ac_5', 'Recent successful deployments indicate active CI/CD for agent assets', recentDeploys > 0, 'No recent successful deployments — ensure agent metadata (AgentScript, BotDefinition, GenAiPlugin) is deployed via CI/CD, not built directly in production'),
+      ac('as_ac_6', 'Agents are defined with descriptions for governance', (agents.records || []).filter(a => a.Description && a.Description.length > 5).length > 0 || agentsCount === 0, agentsCount === 0 ? 'No agents defined' : 'Agents are defined but lack descriptions — document the job-to-be-done for each agent for governance and peer review')
+    ];
+
+    res.json({
+      category: 'Agent Script & Metadata Readiness',
+      agentScriptCount,
+      agentsCount,
+      activeAgentsCount,
+      hasV66,
+      latestApiVersion: latestVersion,
+      recentDeploys,
+      agentScripts: agentScripts.records || [],
+      autoChecks,
+      questions: [
+        { id: 'as_1', text: 'Are agent builders trained on Agent Script DSL (the Spring \'26 hybrid natural language + programmatic language)?', type: 'boolean' },
+        { id: 'as_2', text: 'Is a peer review process established for Agent Script before promotion to Active?', type: 'boolean' },
+        { id: 'as_3', text: 'Are agent assets (AgentScript, BotDefinition, GenAiPlugin, PromptTemplate) included in source control?', type: 'boolean' },
+        { id: 'as_4', text: 'Is the CI/CD pipeline updated to handle the new versioned agent metadata bundle format (Metadata API v66+)?', type: 'boolean' },
+        { id: 'as_5', text: 'Is batch testing in Agentforce Testing Center being used to validate Agent Script accuracy before go-live?', type: 'boolean' },
+        { id: 'as_6', text: 'Is a rollback plan defined if an Agent Script update causes regressions in production?', type: 'boolean' }
+      ]
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Category 28: Licensing Model & FinOps ───────────────────────────────────
+app.get('/api/assess/finops', requireAuth, async (req, res) => {
+  try {
+    const conn = getConn(req);
+
+    const [limits, pricingSettings, agentforceUserLicenses, permSetAssignments] = await Promise.all([
+      safeRest(conn, '/services/data/v62.0/limits/').catch(() => ({})),
+      safeQuery(conn, "SELECT SettingName, SettingValue FROM OrganizationSetting WHERE SettingName IN ('FlexCreditsEnabled','ConversationPricingEnabled','AgentforcePricingModel','EinsteinGptEnabled','AgentforceEnabled') LIMIT 10").catch(() => ({ records: [] })),
+      safeQuery(conn, "SELECT COUNT() FROM PermissionSetLicenseAssign WHERE PermissionSetLicense.DeveloperName LIKE '%Agentforce%' LIMIT 1").catch(() => ({ totalSize: 0 })),
+      safeQuery(conn, "SELECT COUNT() FROM PermissionSetAssignment WHERE PermissionSet.Name LIKE '%Agentforce%' AND Assignee.IsActive = true LIMIT 1").catch(() => ({ totalSize: 0 }))
+    ]);
+
+    const settings = {};
+    (pricingSettings.records || []).forEach(r => { settings[r.SettingName] = r.SettingValue; });
+
+    const einsteinQuota = limits.DailyEinsteinRequests;
+    const hasEinsteinQuota = einsteinQuota && einsteinQuota.Max > 0;
+    const quotaUsedPct = hasEinsteinQuota ? Math.round(((einsteinQuota.Max - einsteinQuota.Remaining) / einsteinQuota.Max) * 100) : 0;
+    const quotaHealthy = hasEinsteinQuota ? quotaUsedPct < 80 : false;
+
+    const agentforceEnabled = settings['AgentforceEnabled'] === 'true';
+    const einsteinEnabled = settings['EinsteinGptEnabled'] === 'true';
+    const hasUserLicenses = (agentforceUserLicenses.totalSize || 0) > 0 || (permSetAssignments.totalSize || 0) > 0;
+    const hasPricingModel = agentforceEnabled || Object.keys(settings).length > 0;
+
+    const autoChecks = [
+      ac('fo_ac_1', 'Agentforce is enabled (licensing prerequisite)', agentforceEnabled, 'Agentforce is not enabled in org settings — confirm licensing is active before any deployment'),
+      ac('fo_ac_2', 'Einstein Generative AI quota (DailyEinsteinRequests) is provisioned', hasEinsteinQuota, 'No DailyEinsteinRequests quota found — Agentforce AI request quota is not provisioned; contact your AE to confirm Flex Credits or Conversations pricing is active'),
+      ac('fo_ac_3', 'Einstein AI quota consumption is below 80%', hasEinsteinQuota && quotaHealthy, hasEinsteinQuota ? `Einstein AI quota is at ${quotaUsedPct}% — monitor consumption to avoid hitting daily limits which would disable agent responses` : 'Quota not provisioned — cannot assess consumption'),
+      ac('fo_ac_4', 'Agentforce user license assignments exist', hasUserLicenses, 'No Agentforce permission set license assignments found — users cannot interact with or manage agents without an Agentforce User license ($5/user/month with base license required)'),
+      ac('fo_ac_5', 'Pricing model is confirmed (Flex Credits vs. Conversations)', hasPricingModel, 'Agentforce pricing model is not confirmed — Flex Credits and Conversations pricing cannot coexist; select before go-live to avoid billing complications'),
+      ac('fo_ac_6', 'AI quota is not critically near limit (<80% consumed)', !hasEinsteinQuota || quotaUsedPct < 80, `Einstein AI quota is at ${quotaUsedPct}% of daily limit — at this rate the org may hit limits during peak hours, halting agent responses`)
+    ];
+
+    res.json({
+      category: 'Licensing Model & FinOps',
+      agentforceEnabled,
+      einsteinEnabled,
+      hasEinsteinQuota,
+      quotaUsedPct: hasEinsteinQuota ? quotaUsedPct : null,
+      hasUserLicenses,
+      hasPricingModel,
+      dailyEinsteinMax: einsteinQuota?.Max || 0,
+      dailyEinsteinRemaining: einsteinQuota?.Remaining || 0,
+      autoChecks,
+      questions: [
+        { id: 'fo_1', text: 'Has the pricing model been confirmed with your Salesforce AE — Flex Credits, Conversations, or Salesforce Foundations (200k free credits)?', type: 'boolean' },
+        { id: 'fo_2', text: 'Is the Digital Wallet configured for Flex Credits usage tracking and cost attribution by team/channel?', type: 'boolean' },
+        { id: 'fo_3', text: 'Are voice action costs budgeted separately (30 Flex Credits per voice action vs. 20 for standard actions)?', type: 'boolean' },
+        { id: 'fo_4', text: 'Is a quota alert or monitoring process defined to notify when DailyEinsteinRequests approaches the daily limit?', type: 'boolean' },
+        { id: 'fo_5', text: 'Are Agentforce User Licenses ($5/user/month) assigned to all users who will interact with or manage agents?', type: 'boolean' },
+        { id: 'fo_6', text: 'Is a FinOps review cadence established to track Flex Credit consumption, optimize agent actions, and forecast costs?', type: 'boolean' }
       ]
     });
   } catch (err) {
