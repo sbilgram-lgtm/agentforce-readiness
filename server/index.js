@@ -78,7 +78,10 @@ app.get('/auth/callback', async (req, res) => {
     req.session.accessToken = conn.accessToken;
     req.session.instanceUrl = conn.instanceUrl;
     req.session.refreshToken = conn.refreshToken;
-    res.redirect(getBaseUrl(req));
+    req.session.save(err => {
+      if (err) return res.redirect(`${getBaseUrl(req)}/?error=session_error`);
+      res.redirect(getBaseUrl(req));
+    });
   } catch (err) {
     console.error('OAuth callback error:', err);
     res.redirect(`${getBaseUrl(req)}/?error=auth_failed`);
