@@ -23,23 +23,24 @@ export default function DashboardPage({ instanceUrl, onLogout }: Props) {
       const data = await fetchCategory(id);
       const apiFindings = getApiFindings(data as Record<string, unknown>);
       const autoChecks = getAutoChecks(data as Record<string, unknown>);
-      const existing = categories[id];
-      const answers = existing?.answers || {};
-      const { score, status, findings } = scoreCategory(data.questions || [], answers, apiFindings, autoChecks);
-      setCategories(prev => ({
-        ...prev,
-        [id]: {
-          category: CATEGORY_LABELS[id],
-          score,
-          status,
-          findings,
-          questions: data.questions || [],
-          answers,
-          apiData: data,
-          note: data.note,
-          autoChecks
-        }
-      }));
+      setCategories(prev => {
+        const answers = prev[id]?.answers || {};
+        const { score, status, findings } = scoreCategory(data.questions || [], answers, apiFindings, autoChecks);
+        return {
+          ...prev,
+          [id]: {
+            category: CATEGORY_LABELS[id],
+            score,
+            status,
+            findings,
+            questions: data.questions || [],
+            answers,
+            apiData: data,
+            note: data.note,
+            autoChecks
+          }
+        };
+      });
     } catch (err: any) {
       setCategories(prev => ({
         ...prev,
@@ -56,7 +57,7 @@ export default function DashboardPage({ instanceUrl, onLogout }: Props) {
     } finally {
       setLoading(prev => ({ ...prev, [id]: false }));
     }
-  }, [categories]);
+  }, []);
 
   const runAll = async () => {
     setRunningAll(true);

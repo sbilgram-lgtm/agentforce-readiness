@@ -48,7 +48,7 @@ export function scoreCategory(
 }
 
 export function computeOverallScore(categories: CategoryResult[]): number {
-  const scored = categories.filter(c => c.status !== 'manual' && c.score > 0);
+  const scored = categories.filter(c => c.status !== 'manual');
   if (scored.length === 0) return 0;
   return Math.round(scored.reduce((sum, c) => sum + c.score, 0) / scored.length);
 }
